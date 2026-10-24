@@ -1,0 +1,24 @@
+# Maintainer: miron302
+pkgname=dawn-cli
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="A beautiful weather, time and date dashboard for your terminal"
+arch=('any')
+url="https://github.com/miron302/dawn-cli"
+license=('MIT')
+depends=('python')
+optdepends=('libpulse: audio visualiser (parec)' 'python-numpy: lighter CPU use for the visualiser')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

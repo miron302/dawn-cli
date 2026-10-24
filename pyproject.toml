@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dawn-cli"
+version = "1.1.0"
+description = "A beautiful weather, time and date dashboard for your terminal"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["terminal", "weather", "clock", "cli", "tui", "arch-linux"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/miron302/dawn-cli"
+
+[project.scripts]
+dawn = "dawn.app:main"
+
+[tool.setuptools]
+packages = ["dawn"]
