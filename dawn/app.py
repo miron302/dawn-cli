@@ -24,8 +24,7 @@ from pathlib import Path
 
 from . import __version__
 
-FRAME_TIME = 0.1  # seconds between animation frames
-FRAME_VIZ = 1 / 24  # faster frames while the audio visualiser is running
+FRAME_TIME = 1 / 30  # smooth 30 frames per second, with or without the visualiser
 
 # --------------------------------------------------------------------------
 # Colour helpers
@@ -1044,6 +1043,7 @@ def run(cfg):
         size, scene, prev = None, None, None
         t0 = time.time()
         while True:
+            frame_start = time.time()
             sz = shutil.get_terminal_size((80, 24))
             W, H = max(20, sz.columns), max(8, sz.lines)
             if (W, H) != size:
@@ -1053,8 +1053,8 @@ def run(cfg):
             out.write("".join(r for i, r in enumerate(rows) if prev is None or prev[i] != r) + "\x1b[0m")
             out.flush()
             prev = rows
-            ft = FRAME_VIZ if (cfg["viz"] and st.audio.proc is not None) else FRAME_TIME
-            if select.select([fd], [], [], ft)[0]:
+            wait = max(0.0, frame_start + FRAME_TIME - time.time())  # keep a steady pace
+            if select.select([fd], [], [], wait)[0]:
                 data = os.read(fd, 64)
                 if data in (b"q", b"Q", b"\x1b"):
                     break

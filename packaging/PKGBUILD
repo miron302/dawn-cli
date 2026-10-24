@@ -1,6 +1,6 @@
 # Maintainer: miron302
 pkgname=dawn-cli
-pkgver=1.1.0
+pkgver=1.1.1
 pkgrel=1
 pkgdesc="A beautiful weather, time and date dashboard for your terminal"
 arch=('any')
