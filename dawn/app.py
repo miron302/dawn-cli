@@ -15,6 +15,7 @@ import termios
 import threading
 import time
 import tty
+import unicodedata
 import urllib.parse
 import urllib.request
 from array import array
@@ -108,6 +109,47 @@ def temp_color(c):
         if a <= c <= b:
             return mix(ca, cb, (c - a) / (b - a))
     return TEMP_STOPS[-1][1]
+
+
+# --------------------------------------------------------------------------
+# Text width helpers (song titles can contain emoji or CJK, which are 2 cells wide)
+# --------------------------------------------------------------------------
+
+
+def cw(ch):
+    """How many terminal cells a character takes: 0, 1 or 2."""
+    if ord(ch) < 0x300:
+        return 1
+    if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def str_width(s):
+    return sum(cw(c) for c in s)
+
+
+def clip(s, width):
+    """Cut s to fit in width cells, adding an ellipsis when it was shortened."""
+    if str_width(s) <= width:
+        return s
+    out, w = [], 0
+    for ch in s:
+        c = cw(ch)
+        if w + c > width - 1:
+            break
+        out.append(ch)
+        w += c
+    return "".join(out) + "\u2026"
+
+
+def pad(s, width, align="<"):
+    gap = max(0, width - str_width(s))
+    if align == ">":
+        return " " * gap + s
+    if align == "^":
+        return " " * (gap // 2) + s + " " * (gap - gap // 2)
+    return s + " " * gap
 
 
 # --------------------------------------------------------------------------
@@ -504,6 +546,110 @@ class SysMon:
                 self.stop.wait(0.2)
 
 
+
+# --------------------------------------------------------------------------
+# Now Playing (asks playerctl what any MPRIS media player is doing)
+# --------------------------------------------------------------------------
+
+_SEP = "\x1f"
+MEDIA_FMT = _SEP.join("{{%s}}" % k for k in ("playerName", "status", "artist", "title", "album", "position", "mpris:length"))
+
+APP_NAMES = {
+    "spotify": "Spotify", "spotifyd": "Spotifyd", "spotify_player": "spotify-player", "ncspot": "ncspot",
+    "firefox": "Firefox", "librewolf": "LibreWolf", "zen": "Zen Browser", "chromium": "Chromium",
+    "chrome": "Google Chrome", "brave": "Brave", "vivaldi": "Vivaldi", "opera": "Opera", "edge": "Microsoft Edge",
+    "plasma-browser-integration": "Browser", "vlc": "VLC", "mpv": "mpv", "celluloid": "Celluloid",
+    "rhythmbox": "Rhythmbox", "strawberry": "Strawberry", "elisa": "Elisa", "amarok": "Amarok",
+    "clementine": "Clementine", "audacious": "Audacious", "cmus": "cmus", "mpd": "MPD", "mpdris2": "MPD",
+    "lollypop": "Lollypop", "quodlibet": "Quod Libet", "deadbeef": "DeaDBeeF", "kdeconnect": "KDE Connect",
+    "tidal-hifi": "TIDAL", "youtube-music": "YouTube Music", "yesplaymusic": "YesPlayMusic",
+    "amberol": "Amberol", "gnome-music": "GNOME Music", "totem": "Videos", "haruna": "Haruna",
+}
+
+
+def app_name(raw):
+    base = raw.split(".")[0]
+    return APP_NAMES.get(base.lower()) or base.replace("_", " ").replace("-", " ").title() or "Unknown player"
+
+
+def clean_text(s):
+    return "".join(c if c.isprintable() else " " for c in s).strip()
+
+
+class MediaMon:
+    def __init__(self):
+        self.enabled = threading.Event()
+        self.stop = threading.Event()
+        self.players = []
+        self.missing = False  # playerctl isn't installed
+        self.ready = False  # have we asked at least once?
+
+    def poll(self):
+        exe = shutil.which("playerctl")
+        self.missing = exe is None
+        if exe is None:
+            self.players, self.ready = [], True
+            return
+        try:
+            r = subprocess.run([exe, "-a", "metadata", "--format", MEDIA_FMT],
+                               capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            return
+        now, found = time.monotonic(), []
+        for line in r.stdout.split("\n"):
+            parts = line.split(_SEP)
+            if len(parts) != 7:
+                continue
+            name, status, artist, title, album = (clean_text(x) for x in parts[:5])
+            try:
+                pos = int(float(parts[5]))
+            except ValueError:
+                pos = None
+            try:
+                length = int(float(parts[6])) or None
+            except ValueError:
+                length = None
+            if not (title or artist) and status != "Playing":
+                continue  # an idle player with nothing loaded
+            found.append({"name": name, "status": status, "artist": artist, "title": title,
+                          "album": album, "pos": pos, "len": length, "at": now})
+        self.players, self.ready = found, True
+
+    def current(self):
+        """The player to show (one that's playing wins) and how many others there are."""
+        for want in ("Playing", "Paused"):
+            for p in self.players:
+                if p["status"] == want:
+                    return p, len(self.players) - 1
+        if self.players:
+            return self.players[0], len(self.players) - 1
+        return None, 0
+
+    @staticmethod
+    def position(p):
+        """Seconds into the track, kept moving between polls while it's playing."""
+        if p["pos"] is None:
+            return None
+        pos = p["pos"]
+        if p["status"] == "Playing":
+            pos += int((time.monotonic() - p["at"]) * 1e6)
+        if p["len"]:
+            pos = min(pos, p["len"])
+        return max(0, pos) / 1e6
+
+    def loop(self):
+        while not self.stop.is_set():
+            if self.enabled.is_set():
+                try:
+                    self.poll()
+                except Exception:
+                    pass
+                self.stop.wait(1.0)
+            else:
+                self.ready = False
+                self.stop.wait(0.2)
+
+
 class State:
     def __init__(self):
         self.place = None
@@ -514,6 +660,7 @@ class State:
         self.stop = threading.Event()
         self.audio = Audio()
         self.sysmon = SysMon()
+        self.media = MediaMon()
 
 
 def worker(st, city):
@@ -564,9 +711,15 @@ class Frame:
     def text(self, x, y, s, fg, bold=False):
         if not 0 <= y < self.H:
             return
-        for i, ch in enumerate(s):
-            if ch != " " and 0 <= x + i < self.W:
-                self.txt[(x + i, y)] = (ch, fg, bold)
+        for ch in s:
+            w = cw(ch)
+            if w == 0:
+                continue
+            if ch != " " and 0 <= x and x + w <= self.W:
+                self.txt[(x, y)] = (ch, fg, bold)
+                if w == 2:  # the second cell is covered by the wide character
+                    self.txt[(x + 1, y)] = ("", fg, bold)
+            x += w
 
     def rows(self, absolute=True):
         out = []
@@ -756,7 +909,7 @@ def seg(text, fg=WHITE, bold=False):
 
 
 def width_of(segs):
-    return sum(len(s[0]) for s in segs)
+    return sum(str_width(s[0]) for s in segs)
 
 
 def fmt_temp(c, units, unit_label=False):
@@ -844,9 +997,9 @@ def build_lines(st, now, W, cfg, big, days, footer, icon):
         L.append([])
         if inner >= 40:
             L.append([seg("q quit \u00b7 u units \u00b7 t clock \u00b7 r refresh", (110, 120, 145))])
-            L.append([seg("p processes \u00b7 v visualiser", (110, 120, 145))])
+            L.append([seg("p processes \u00b7 m now playing \u00b7 v visualiser", (110, 120, 145))])
         else:
-            L.append([seg("q quit \u00b7 p procs \u00b7 v viz", (110, 120, 145))])
+            L.append([seg("q quit \u00b7 p procs \u00b7 m music", (110, 120, 145))])
     L.append([])
     return L
 
@@ -885,11 +1038,42 @@ def fmt_up(sec):
     return f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m"
 
 
+TABS = (("procs", "PROCESSES"), ("media", "NOW PLAYING"))
+DARK = (64, 72, 96)
+HINT = (110, 120, 145)
+
+
+def tab_bar(active):
+    top, under = [], []
+    for i, (key, label) in enumerate(TABS):
+        if i:
+            top.append(seg("   "))
+            under.append(seg("   "))
+        on = key == active
+        top.append(seg(label, WHITE if on else DIM, on))
+        under.append(seg(("\u2501" if on else "\u2500") * len(label), BLUE if on else DARK))
+    return [top, under]
+
+
+def shrink(lines, H):
+    """Drop blank spacer lines from the middle until the panel fits the window."""
+    lines = list(lines)
+    while len(lines) + 2 > H:
+        for i in range(len(lines) - 2, 0, -1):
+            if not lines[i]:
+                del lines[i]
+                break
+        else:
+            break
+    return lines
+
+
 def build_proc_lines(sm, H, cfg):
     mem_used, mem_total = sm.mem
-    n = min(8, H - 2 - 11)
-    title = f"{'PROCESSES':<12}{('load %.2f  up %s' % (sm.load[0], fmt_up(sm.uptime))):>{TW - 12}}"
-    L = [[], [seg(title, WHITE, True)], []]
+    n = min(8, H - 16)
+    L = [[]] + tab_bar("procs")
+    L.append([seg(f"load {sm.load[0]:.2f} \u00b7 up {fmt_up(sm.uptime)}".center(TW), DIM)])
+    L.append([])
     L.append(gauge("CPU", sm.cpu / 100, f"{sm.cpu:.0f}%"))
     if n >= 2:
         hist = list(sm.hist)[-(TW - 4):]
@@ -907,18 +1091,88 @@ def build_proc_lines(sm, H, cfg):
             f = min(1.0, cpu / 100)
             fill = int(round(f * 8))
             L.append([
-                seg(f"{name:<14.14} ", WHITE),
+                seg(pad(clip(name, 14), 14) + " ", WHITE),
                 seg("\u2588" * fill, ramp(f)),
-                seg("\u00b7" * (8 - fill), (64, 72, 96)),
+                seg("\u00b7" * (8 - fill), DARK),
                 seg(f" {cpu:5.1f}", ramp(f) if cpu >= 0.1 else DIM),
                 seg(f" {human(rss):>7}", DIM),
             ])
         for _ in range(n - len(rows[:n])):
             L.append([seg(" " * TW)])
         L.append([])
-        L.append([seg(f"sorted by {'memory' if by_mem else 'cpu'} \u00b7 s to change".center(TW), (110, 120, 145))])
+        L.append([seg(f"sort: {'memory' if by_mem else 'cpu'} \u00b7 s change \u00b7 tab: switch".center(TW), HINT)])
     L.append([])
     return L
+
+
+def fmt_time(sec):
+    sec = int(sec)
+    h, m, s_ = sec // 3600, sec // 60 % 60, sec % 60
+    return f"{h}:{m:02d}:{s_:02d}" if h else f"{m}:{s_:02d}"
+
+
+def scroll(text, width, t, animate):
+    """Centre text that fits; scroll it (like a car stereo) when it's too long."""
+    if str_width(text) <= width:
+        return pad(text, width, "^")
+    if not animate:
+        return pad(clip(text, width), width, "^")
+    loop = text + "   \u2022   "
+    off = int(t * 5) % len(loop)
+    out, w = [], 0
+    for ch in (loop + loop)[off:]:
+        c = cw(ch)
+        if w + c > width:
+            break
+        out.append(ch)
+        w += c
+    return pad("".join(out), width)
+
+
+def build_media_lines(mm, H, t):
+    L = [[]] + tab_bar("media") + [[]]
+    p, others = mm.current() if mm.ready and not mm.missing else (None, 0)
+    if mm.missing:
+        L += [[seg("playerctl isn't installed", WHITE, True)], [],
+              [seg("Install it to see what's playing:", DIM)], [],
+              [seg("pacman -S playerctl", WHITE)], [seg("dnf install playerctl", WHITE)]]
+    elif not mm.ready:
+        L += [[seg("Looking for a player\u2026", DIM)]]
+    elif p is None:
+        L += [[seg("Nothing is playing", WHITE, True)], [],
+              [seg("Start music in Spotify, a browser,", DIM)],
+              [seg("VLC, mpv or any media player.", DIM)]]
+    else:
+        playing = p["status"] == "Playing"
+        icon = "\u25b6" if playing else "\u25ae\u25ae" if p["status"] == "Paused" else "\u25a0"
+        col = BLUE if playing else DIM
+        bars = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+        eq = "".join(bars[int((math.sin(t * 5 + i * 1.9) * 0.5 + 0.5) * 7)] if playing else bars[0] for i in range(4))
+        L.append([seg(f"{icon} ", col, True), seg(app_name(p["name"]), WHITE, True), seg("  "), seg(eq, col)])
+        L.append([])
+        L.append([seg(scroll(p["title"] or "Unknown title", TW, t, playing), WHITE, True)])
+        if p["artist"]:
+            L.append([seg(pad(clip(p["artist"], TW), TW, "^"), BLUE)])
+        if p["album"]:
+            L.append([seg(pad(clip(p["album"], TW), TW, "^"), DIM)])
+        pos = mm.position(p)
+        if pos is not None:
+            L.append([])
+            if p["len"]:
+                total = p["len"] / 1e6
+                fill = int(max(0.0, min(1.0, pos / total)) * (TW - 1))
+                L.append([seg("\u2501" * fill, col), seg("\u25cf", WHITE), seg("\u2500" * (TW - 1 - fill), DARK)])
+                right = fmt_time(total)
+                L.append([seg(fmt_time(pos) + " " * (TW - len(fmt_time(pos)) - len(right)) + right, DIM)])
+            else:
+                L.append([seg(fmt_time(pos).center(TW), DIM)])
+        if others:
+            L.append([])
+            L.append([seg(f"+{others} other player{'s' if others > 1 else ''}".center(TW), HINT)])
+    L.append([])
+    L.append([seg("tab: switch \u00b7 m close".center(TW), HINT)])
+    L.append([])
+    return shrink(L, H)
 
 
 # ---- glass panels
@@ -947,16 +1201,21 @@ def draw_glass(fr, lines, x0, y0, pw, ph, border):
         x = x0 + (pw - width_of(segs)) // 2
         for text, fg, bold in segs:
             fr.text(x, y0 + 1 + i, text, fg, bold)
-            x += len(text)
+            x += str_width(text)
 
 
-def draw_panels(fr, st, now, cfg, pulse):
+def draw_panels(fr, st, now, cfg, pulse, t=0.0):
     W, H = fr.W, fr.H
     border = mix(BORDER, (255, 255, 255), min(1.0, pulse) * 0.7)
     panels = []
 
-    proc = build_proc_lines(st.sysmon, H, cfg) if cfg.get("procs") else None
-    avail = W - (TW + 8 + 2) if proc else W
+    panel = cfg.get("panel")
+    side = None
+    if panel == "procs":
+        side = build_proc_lines(st.sysmon, H, cfg)
+    elif panel == "media":
+        side = build_media_lines(st.media, H, t)
+    avail = W - (TW + 8 + 2) if side else W
 
     main = None
     for opts in OPTIONS:
@@ -964,12 +1223,12 @@ def draw_panels(fr, st, now, cfg, pulse):
         if len(lines) + 2 <= H and max(width_of(l) for l in lines) + 8 <= avail:
             main = lines
             break
-    if main is None and not proc:
+    if main is None and not side:
         main = lines  # nothing fits: show the smallest layout and let it clip
     if main:
         panels.append(main)
-    if proc:
-        panels.append(proc)
+    if side:
+        panels.append(side)
 
     sizes = [(min(W, max(width_of(l) for l in p) + 8), min(H, len(p) + 2)) for p in panels]
     x = (W - (sum(w for w, _ in sizes) + 2 * (len(sizes) - 1))) // 2
@@ -993,7 +1252,7 @@ def compose(W, H, st, cfg, scene, t):
 
     fr = Frame(W, H)
     scene.draw(fr, hour, kind, inten, t, bars, pulse)
-    draw_panels(fr, st, now, cfg, pulse)
+    draw_panels(fr, st, now, cfg, pulse, t)
     if cfg.get("viz") and st.audio.err and not st.audio.demo:
         msg = "\u266a " + st.audio.err
         fr.text((W - len(msg)) // 2, H - 1, msg, DIM)
@@ -1008,9 +1267,13 @@ CONF = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "daw
 
 
 def load_config():
-    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "procs": False, "sort": "cpu"}
+    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "panel": "none", "sort": "cpu"}
     try:
-        cfg.update(json.loads(CONF.read_text()))
+        saved = json.loads(CONF.read_text())
+        if "panel" not in saved and saved.get("procs"):  # settings saved by dawn 1.1
+            saved["panel"] = "procs"
+        saved.pop("procs", None)
+        cfg.update(saved)
     except Exception:
         pass
     return cfg
@@ -1024,12 +1287,17 @@ def run(cfg):
     out = sys.stdout
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     threading.Thread(target=st.sysmon.loop, daemon=True).start()
+    threading.Thread(target=st.media.loop, daemon=True).start()
 
     def apply():
-        if cfg["procs"]:
+        if cfg["panel"] == "procs":
             st.sysmon.enabled.set()
         else:
             st.sysmon.enabled.clear()
+        if cfg["panel"] == "media":
+            st.media.enabled.set()
+        else:
+            st.media.enabled.clear()
         if cfg["viz"]:
             st.audio.start()
         else:
@@ -1065,7 +1333,13 @@ def run(cfg):
                 elif data == b"r":
                     st.refresh.set()
                 elif data == b"p":
-                    cfg["procs"] = not cfg["procs"]
+                    cfg["panel"] = "none" if cfg["panel"] == "procs" else "procs"
+                    apply()
+                elif data == b"m":
+                    cfg["panel"] = "none" if cfg["panel"] == "media" else "media"
+                    apply()
+                elif data == b"\t" and cfg["panel"] != "none":
+                    cfg["panel"] = "media" if cfg["panel"] == "procs" else "procs"
                     apply()
                 elif data == b"v":
                     cfg["viz"] = not cfg["viz"]
@@ -1077,6 +1351,7 @@ def run(cfg):
     finally:
         st.stop.set()
         st.sysmon.stop.set()
+        st.media.stop.set()
         st.audio.stop()
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         out.write("\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l")
@@ -1093,10 +1368,18 @@ def once(cfg):
         st.error = str(e)
     if cfg["viz"]:
         st.audio.demo = True  # no sound in a still frame, so show a sample spectrum
-    if cfg["procs"]:
+    if cfg["panel"] == "procs":
         st.sysmon.update()
         time.sleep(0.5)
         st.sysmon.update()
+    elif cfg["panel"] == "media":
+        st.media.poll()
+        if not st.media.players:  # nothing playing, so show a sample track
+            st.media.missing = False
+            st.media.players = [{"name": "spotify", "status": "Playing", "artist": "M83", "title": "Midnight City",
+                                 "album": "Hurry Up, We're Dreaming", "pos": 83_000_000, "len": 243_000_000,
+                                 "at": time.monotonic()}]
+        st.media.ready = True
     sz = shutil.get_terminal_size((100, 32))
     scene = Scene(sz.columns, sz.lines)
     fr = compose(sz.columns, sz.lines, st, cfg, scene, 3.0)
@@ -1107,13 +1390,16 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog="dawn",
         description="A beautiful weather, time & date dashboard for your terminal.",
-        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
+        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 tab switch \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
     )
     p.add_argument("-c", "--city", help='show this place instead of auto-detecting, e.g. --city "Tokyo"')
     p.add_argument("-u", "--units", choices=["c", "f"], help="temperature units: c (Celsius) or f (Fahrenheit)")
     p.add_argument("--12h", dest="h12", action="store_const", const=True, help="use a 12-hour clock")
     p.add_argument("--24h", dest="h12", action="store_const", const=False, help="use a 24-hour clock")
-    p.add_argument("--procs", action=argparse.BooleanOptionalAction, help="show the process viewer")
+    p.add_argument("--panel", choices=["procs", "media", "none"], help="side panel to open at start")
+    p.add_argument("--procs", dest="panel", action="store_const", const="procs", help="open the process viewer at start")
+    p.add_argument("--media", dest="panel", action="store_const", const="media", help="open the Now Playing tab at start")
+    p.add_argument("--no-procs", dest="panel", action="store_const", const="none", help=argparse.SUPPRESS)
     p.add_argument("--viz", action=argparse.BooleanOptionalAction, help="show the audio visualiser")
     p.add_argument("--save", action="store_true", help="remember these options for next time")
     p.add_argument("--once", action="store_true", help="print one frame and exit (handy for screenshots)")
@@ -1121,7 +1407,7 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     cfg = load_config()
-    for k in ("city", "units", "h12", "procs", "viz"):
+    for k in ("city", "units", "h12", "panel", "viz"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
 
