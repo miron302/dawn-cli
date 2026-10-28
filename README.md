@@ -12,9 +12,9 @@ Open a terminal, type `dawn`, and get a living sky behind a big clock, today's d
 - 5-day forecast
 - Animated sky: sun, moon, twinkling stars, drifting clouds, rain, snow and lightning
 - **Audio visualiser** (like cava): glowing bars rise out of the scene and dance to whatever you're playing
-- **Side panel with two tabs:**
-  - **Processes** (like a mini htop): CPU and memory gauges, a CPU history graph and the busiest programs
-  - **Now Playing**: the song, artist and progress of whatever is playing, and which app it's playing from
+- **Two optional side panels**, which you can open at the same time as the clock:
+  - **Now Playing** (on the left): the song, artist and progress of whatever is playing, and which app it's playing from
+  - **Processes** (on the right, like a mini htop): CPU and memory gauges, a CPU history graph and the busiest programs
 - Finds your location automatically, or pick any city
 - Celsius or Fahrenheit, 12-hour or 24-hour clock
 - No account and no API key
@@ -63,7 +63,7 @@ Press `q` to quit.
 **Arch-based**
 
 ```bash
-sudo pacman -S --needed python-pipx git
+sudo pacman -S --needed python-pipx python-filelock git
 pipx install git+https://github.com/miron302/dawn-cli.git
 pipx ensurepath
 ```
@@ -87,7 +87,7 @@ These make the two music features work. Everything else works without them.
 | Feature | Arch-based | Fedora-based |
 | --- | --- | --- |
 | Audio visualiser | `sudo pacman -S libpulse` | `sudo dnf install pulseaudio-utils` |
-| Now Playing tab | `sudo pacman -S playerctl` | `sudo dnf install playerctl` |
+| Now Playing panel | `sudo pacman -S playerctl` | `sudo dnf install playerctl` |
 
 ---
 
@@ -99,9 +99,8 @@ These make the two music features work. Everything else works without them.
 | `u` | Switch between °C and °F |
 | `t` | Switch between 12-hour and 24-hour clock |
 | `v` | Show or hide the audio visualiser |
-| `p` | Open or close the **Processes** tab |
-| `m` | Open or close the **Now Playing** tab |
-| `Tab` | Switch between the two tabs while one is open |
+| `p` | Open or close the **Processes** panel (right) |
+| `m` | Open or close the **Now Playing** panel (left) |
 | `s` | Sort processes by CPU or memory |
 | `r` | Refresh the weather now |
 
@@ -112,8 +111,9 @@ dawn                      # auto-detect your location
 dawn --city "Tokyo"       # show a specific place
 dawn --units f            # Fahrenheit
 dawn --12h                # 12-hour clock
-dawn --media              # start with the Now Playing tab open
+dawn --media              # start with the Now Playing panel open
 dawn --procs              # start with the process viewer open
+dawn --media --procs      # start with both open
 dawn --no-viz             # start without the audio visualiser
 dawn --city Paris --units c --24h --save   # remember these choices
 ```
@@ -130,15 +130,17 @@ If the bars stay flat while music is playing, make sure the helper from "Optiona
 
 ## The process viewer
 
-Press `p` to open a frosted-glass panel next to the clock. It shows CPU and memory use, a short CPU history graph, load and uptime, and the busiest programs with their CPU and memory use. The percentages work like htop's, so a program using two cores can show 200%. It's a quick glance, not a replacement for htop (you can't kill processes from here).
+Press `p` to open a frosted-glass panel on the right of the clock. It shows CPU and memory use, a short CPU history graph, load and uptime, and the busiest programs with their CPU and memory use. The percentages work like htop's, so a program using two cores can show 200%. It's a quick glance, not a replacement for htop (you can't kill processes from here).
 
 ## Now Playing
 
-Press `m` to see what's playing right now: the song title (long titles scroll), the artist, the album, a progress bar, and **which app it's playing from** (Spotify, Firefox, VLC and so on). If several players are open it shows the one that's playing, and tells you how many others there are.
+Press `m` to open a panel on the left of the clock showing what's playing right now: the song title (long titles scroll), the artist, the album, a progress bar, and **which app it's playing from** (Spotify, Firefox, VLC and so on). If several players are open it shows the one that's playing, and tells you how many others there are.
 
 It works with any player that reports what it's playing to your desktop. That includes Spotify, Firefox, Chromium-based browsers (Chrome, Brave and others), VLC, Rhythmbox and many more. mpv needs the `mpv-mpris` add-on to report anything. It needs the `playerctl` helper from "Optional extras".
 
-On a narrow terminal the side panel takes over the screen, so make the window wider to see it next to the clock.
+## Window size
+
+The panels open independently, so you can have just the clock, the clock with either panel, or all three together. All three need a window about 130 columns wide, and about 160 columns to also fit the 5-day forecast. If the window is too narrow, dawn keeps the panel you opened most recently and shows a small hint at the bottom telling you what's hidden. Widen the window and it all comes back.
 
 ---
 
@@ -152,6 +154,9 @@ pipx uninstall dawn-cli    # remove it
 ---
 
 ## Troubleshooting
+
+**`pipx` crashes with "No module named 'filelock'"**
+That's a missing piece in `pipx` itself, not dawn. Install it and try again: `sudo pacman -S python-filelock` (Arch-based) or `sudo dnf install python3-filelock` (Fedora-based). The installer script does this for you on Arch-based systems.
 
 **`dawn: command not found`**
 Run `pipx ensurepath`, then close and reopen your terminal.
@@ -177,6 +182,9 @@ The app has to report what it's playing. Most do. If yours doesn't, `playerctl -
 **Some symbols look like empty boxes**
 Install a font with good symbol coverage (for example DejaVu: `ttf-dejavu` on Arch, `dejavu-sans-fonts` on Fedora) and make sure your terminal uses it.
 
+**A panel disappeared**
+The window is probably too narrow for everything that's open. Look for the "Widen the window" hint at the bottom, and make the window wider.
+
 **It looks cramped**
 Make the terminal window bigger. dawn adapts to any size, and a larger window shows more (including the 5-day forecast).
 
@@ -189,7 +197,7 @@ dawn does not collect anything and has no tracking. To work, it talks to two fre
 - [Open-Meteo](https://open-meteo.com/) for the weather (and to look up a city name)
 - [ipwho.is](https://ipwho.is/) to guess your city from your IP address (skipped when you use `--city`)
 
-The audio visualiser, process viewer and Now Playing tab run entirely on your computer and send nothing anywhere.
+The audio visualiser, process viewer and Now Playing panel run entirely on your computer and send nothing anywhere.
 
 ---
 

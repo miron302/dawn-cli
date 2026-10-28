@@ -98,6 +98,11 @@ else
   need=()
   have git  || need+=(git)
   have pipx || need+=("$PKG_PIPX")
+  # pipx imports 'filelock' when it installs something. On some Arch systems it
+  # isn't pulled in, and pipx then crashes with "No module named 'filelock'".
+  if [ "$PM" = pacman ] && ! pacman -Qq python-filelock >/dev/null 2>&1; then
+    need+=(python-filelock)
+  fi
   if [ "${#need[@]}" -gt 0 ]; then
     say "Installing required packages: ${need[*]}"
     install_pkgs "${need[@]}"
@@ -117,9 +122,18 @@ fi
 # --- Install dawn itself ----------------------------------------------------
 # From inside a cloned copy install that, otherwise install from GitHub.
 if [ -f pyproject.toml ] && grep -q 'name = "dawn-cli"' pyproject.toml 2>/dev/null; then
-  pipx install --force .
+  SOURCE=.
 else
-  pipx install --force "git+${REPO}"
+  SOURCE="git+${REPO}"
+fi
+
+if ! pipx install --force "$SOURCE"; then
+  echo >&2
+  warn "pipx failed, so dawn was not installed. That error comes from pipx, not from dawn."
+  warn "If it said \"No module named 'filelock'\", install it and run this again:"
+  warn "    Arch-based:   sudo pacman -S python-filelock"
+  warn "    Fedora-based: sudo dnf install python3-filelock"
+  exit 1
 fi
 
 pipx ensurepath >/dev/null 2>&1 || true

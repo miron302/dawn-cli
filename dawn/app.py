@@ -661,6 +661,7 @@ class State:
         self.audio = Audio()
         self.sysmon = SysMon()
         self.media = MediaMon()
+        self.recent = []  # side panels, most recently opened first
 
 
 def worker(st, city):
@@ -1038,21 +1039,12 @@ def fmt_up(sec):
     return f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m"
 
 
-TABS = (("procs", "PROCESSES"), ("media", "NOW PLAYING"))
 DARK = (64, 72, 96)
 HINT = (110, 120, 145)
 
 
-def tab_bar(active):
-    top, under = [], []
-    for i, (key, label) in enumerate(TABS):
-        if i:
-            top.append(seg("   "))
-            under.append(seg("   "))
-        on = key == active
-        top.append(seg(label, WHITE if on else DIM, on))
-        under.append(seg(("\u2501" if on else "\u2500") * len(label), BLUE if on else DARK))
-    return [top, under]
+def panel_title(label):
+    return [[seg(label, WHITE, True)], [seg("\u2501" * len(label), BLUE)]]
 
 
 def shrink(lines, H):
@@ -1071,7 +1063,7 @@ def shrink(lines, H):
 def build_proc_lines(sm, H, cfg):
     mem_used, mem_total = sm.mem
     n = min(8, H - 16)
-    L = [[]] + tab_bar("procs")
+    L = [[]] + panel_title("PROCESSES")
     L.append([seg(f"load {sm.load[0]:.2f} \u00b7 up {fmt_up(sm.uptime)}".center(TW), DIM)])
     L.append([])
     L.append(gauge("CPU", sm.cpu / 100, f"{sm.cpu:.0f}%"))
@@ -1100,7 +1092,7 @@ def build_proc_lines(sm, H, cfg):
         for _ in range(n - len(rows[:n])):
             L.append([seg(" " * TW)])
         L.append([])
-        L.append([seg(f"sort: {'memory' if by_mem else 'cpu'} \u00b7 s change \u00b7 tab: switch".center(TW), HINT)])
+        L.append([seg(f"sorted by {'memory' if by_mem else 'cpu'} \u00b7 s to change".center(TW), HINT)])
     L.append([])
     return L
 
@@ -1130,7 +1122,7 @@ def scroll(text, width, t, animate):
 
 
 def build_media_lines(mm, H, t):
-    L = [[]] + tab_bar("media") + [[]]
+    L = [[]] + panel_title("NOW PLAYING") + [[]]
     p, others = mm.current() if mm.ready and not mm.missing else (None, 0)
     if mm.missing:
         L += [[seg("playerctl isn't installed", WHITE, True)], [],
@@ -1170,7 +1162,7 @@ def build_media_lines(mm, H, t):
             L.append([])
             L.append([seg(f"+{others} other player{'s' if others > 1 else ''}".center(TW), HINT)])
     L.append([])
-    L.append([seg("tab: switch \u00b7 m close".center(TW), HINT)])
+    L.append([seg("m to close".center(TW), HINT)])
     L.append([])
     return shrink(L, H)
 
@@ -1204,37 +1196,74 @@ def draw_glass(fr, lines, x0, y0, pw, ph, border):
             x += str_width(text)
 
 
+SIDE_W = TW + 8
+PANEL_LABELS = {"media": "now playing", "procs": "processes"}
+
+
 def draw_panels(fr, st, now, cfg, pulse, t=0.0):
+    """Layout, left to right: Now Playing | clock and weather | Processes."""
     W, H = fr.W, fr.H
     border = mix(BORDER, (255, 255, 255), min(1.0, pulse) * 0.7)
+
+    enabled = [k for k in ("media", "procs") if cfg.get(k)]
+    order = [k for k in st.recent if k in enabled] + [k for k in enabled if k not in st.recent]
+    side = {}
+    if "media" in enabled:
+        side["media"] = build_media_lines(st.media, H, t)
+    if "procs" in enabled:
+        side["procs"] = build_proc_lines(st.sysmon, H, cfg)
+
+    def fit_main(avail):
+        last = None
+        for opts in OPTIONS:
+            last = build_lines(st, now, avail, cfg, *opts)
+            if len(last) + 2 <= H and max(width_of(l) for l in last) + 8 <= avail:
+                return last, True
+        return last, False
+
+    # Try to show everything. If the window is too narrow, drop things in this order:
+    # the older side panel first, then the clock, always keeping what was opened last.
+    shown, main = [], None
+    if not enabled:
+        main, _ = fit_main(W)
+    else:
+        plans = [(order, True)]
+        if len(order) > 1:
+            plans += [([k], True) for k in order]
+            plans.append((order, False))
+        plans += [([k], False) for k in order]
+        for keys, with_main in plans:
+            if with_main:
+                lines, ok = fit_main(W - len(keys) * (SIDE_W + 2))
+                if ok:
+                    shown, main = keys, lines
+                    break
+            elif len(keys) * SIDE_W + (len(keys) - 1) * 2 <= W:
+                shown, main = keys, None
+                break
+        else:
+            shown, main = order[:1], None  # absurdly narrow: show one panel and let it clip
+
     panels = []
-
-    panel = cfg.get("panel")
-    side = None
-    if panel == "procs":
-        side = build_proc_lines(st.sysmon, H, cfg)
-    elif panel == "media":
-        side = build_media_lines(st.media, H, t)
-    avail = W - (TW + 8 + 2) if side else W
-
-    main = None
-    for opts in OPTIONS:
-        lines = build_lines(st, now, avail, cfg, *opts)
-        if len(lines) + 2 <= H and max(width_of(l) for l in lines) + 8 <= avail:
-            main = lines
-            break
-    if main is None and not side:
-        main = lines  # nothing fits: show the smallest layout and let it clip
+    if "media" in shown:
+        panels.append(side["media"])
     if main:
         panels.append(main)
-    if side:
-        panels.append(side)
+    if "procs" in shown:
+        panels.append(side["procs"])
 
     sizes = [(min(W, max(width_of(l) for l in p) + 8), min(H, len(p) + 2)) for p in panels]
     x = (W - (sum(w for w, _ in sizes) + 2 * (len(sizes) - 1))) // 2
     for p, (pw, ph) in zip(panels, sizes):
         draw_glass(fr, p, x, (H - ph) // 2, pw, ph, border)
         x += pw + 2
+
+    hidden = [PANEL_LABELS[k] for k in enabled if k not in shown]
+    if enabled and main is None:
+        hidden.insert(0, "clock and weather")
+    if hidden and H >= 3:
+        msg = "Widen the window to show: " + ", ".join(hidden)
+        fr.text(max(0, (W - len(msg)) // 2), H - 2, msg, DIM)
 
 
 def compose(W, H, st, cfg, scene, t):
@@ -1267,12 +1296,12 @@ CONF = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "daw
 
 
 def load_config():
-    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "panel": "none", "sort": "cpu"}
+    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "procs": False, "media": False, "sort": "cpu"}
     try:
         saved = json.loads(CONF.read_text())
-        if "panel" not in saved and saved.get("procs"):  # settings saved by dawn 1.1
-            saved["panel"] = "procs"
-        saved.pop("procs", None)
+        panel = saved.pop("panel", None)  # dawn 1.2 had a single side panel
+        if panel in ("procs", "media"):
+            saved[panel] = True
         cfg.update(saved)
     except Exception:
         pass
@@ -1290,11 +1319,11 @@ def run(cfg):
     threading.Thread(target=st.media.loop, daemon=True).start()
 
     def apply():
-        if cfg["panel"] == "procs":
+        if cfg["procs"]:
             st.sysmon.enabled.set()
         else:
             st.sysmon.enabled.clear()
-        if cfg["panel"] == "media":
+        if cfg["media"]:
             st.media.enabled.set()
         else:
             st.media.enabled.clear()
@@ -1303,6 +1332,15 @@ def run(cfg):
         else:
             st.audio.stop()
 
+    def toggle(key):
+        cfg[key] = not cfg[key]
+        if cfg[key]:
+            st.recent.insert(0, key)
+        elif key in st.recent:
+            st.recent.remove(key)
+        apply()
+
+    st.recent = [k for k in ("media", "procs") if cfg[k]]
     try:
         apply()
         tty.setcbreak(fd)
@@ -1333,14 +1371,9 @@ def run(cfg):
                 elif data == b"r":
                     st.refresh.set()
                 elif data == b"p":
-                    cfg["panel"] = "none" if cfg["panel"] == "procs" else "procs"
-                    apply()
+                    toggle("procs")
                 elif data == b"m":
-                    cfg["panel"] = "none" if cfg["panel"] == "media" else "media"
-                    apply()
-                elif data == b"\t" and cfg["panel"] != "none":
-                    cfg["panel"] = "media" if cfg["panel"] == "procs" else "procs"
-                    apply()
+                    toggle("media")
                 elif data == b"v":
                     cfg["viz"] = not cfg["viz"]
                     apply()
@@ -1368,11 +1401,11 @@ def once(cfg):
         st.error = str(e)
     if cfg["viz"]:
         st.audio.demo = True  # no sound in a still frame, so show a sample spectrum
-    if cfg["panel"] == "procs":
+    if cfg["procs"]:
         st.sysmon.update()
         time.sleep(0.5)
         st.sysmon.update()
-    elif cfg["panel"] == "media":
+    if cfg["media"]:
         st.media.poll()
         if not st.media.players:  # nothing playing, so show a sample track
             st.media.missing = False
@@ -1390,16 +1423,14 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog="dawn",
         description="A beautiful weather, time & date dashboard for your terminal.",
-        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 tab switch \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
+        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
     )
     p.add_argument("-c", "--city", help='show this place instead of auto-detecting, e.g. --city "Tokyo"')
     p.add_argument("-u", "--units", choices=["c", "f"], help="temperature units: c (Celsius) or f (Fahrenheit)")
     p.add_argument("--12h", dest="h12", action="store_const", const=True, help="use a 12-hour clock")
     p.add_argument("--24h", dest="h12", action="store_const", const=False, help="use a 24-hour clock")
-    p.add_argument("--panel", choices=["procs", "media", "none"], help="side panel to open at start")
-    p.add_argument("--procs", dest="panel", action="store_const", const="procs", help="open the process viewer at start")
-    p.add_argument("--media", dest="panel", action="store_const", const="media", help="open the Now Playing tab at start")
-    p.add_argument("--no-procs", dest="panel", action="store_const", const="none", help=argparse.SUPPRESS)
+    p.add_argument("--procs", action=argparse.BooleanOptionalAction, help="show the process viewer (right)")
+    p.add_argument("--media", action=argparse.BooleanOptionalAction, help="show the Now Playing panel (left)")
     p.add_argument("--viz", action=argparse.BooleanOptionalAction, help="show the audio visualiser")
     p.add_argument("--save", action="store_true", help="remember these options for next time")
     p.add_argument("--once", action="store_true", help="print one frame and exit (handy for screenshots)")
@@ -1407,7 +1438,7 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     cfg = load_config()
-    for k in ("city", "units", "h12", "panel", "viz"):
+    for k in ("city", "units", "h12", "procs", "media", "viz"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
 
