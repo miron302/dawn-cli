@@ -53,6 +53,11 @@ def lum(c):
     return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 
 
+def orange(c):
+    """Re-colour any colour in shades of Halloween orange, keeping its brightness."""
+    return mix((70, 28, 0), (255, 150, 25), min(1.0, lum(c) / 255 * 1.08))
+
+
 def sat(c, k):
     g = lum(c)
     return tuple(max(0, min(255, int(g + (v - g) * k))) for v in c)
@@ -258,6 +263,9 @@ FONT = {
     "8": ["###", "# #", "###", "# #", "###"],
     "9": ["###", "# #", "###", "  #", "###"],
     ":": [" ", "#", " ", "#", " "],
+    "B": ["## ", "# #", "## ", "# #", "## "],
+    "O": ["###", "# #", "# #", "# #", "###"],
+    "?": ["###", "  #", " ##", "   ", " # "],
 }
 
 
@@ -699,6 +707,7 @@ class Frame:
         self.W, self.H, self.PH = W, H, H * 2
         self.px = [None] * self.PH
         self.txt = {}
+        self.halloween = False
 
     def put(self, x, y, c, a):
         if 0 <= x < self.W and 0 <= y < self.PH and a > 0:
@@ -734,6 +743,8 @@ class Frame:
                 top, bot = top_row[x], bot_row[x]
                 if t:
                     ch, fg, bold = t
+                    if self.halloween:
+                        fg = orange(fg)
                     key = (fg, mix(top, bot, 0.5), bold)
                 else:
                     ch = "\u2580"
@@ -775,8 +786,14 @@ class Scene:
         self.hills = [
             (rng.uniform(0, 6), rng.uniform(0, 6), rng.uniform(0.04, 0.07), rng.uniform(0.11, 0.17)) for _ in range(2)
         ]
+        k = max(2, min(7, W // 26))
+        sizes = [1.0, 0.7, 1.15, 0.85, 1.05, 0.7, 0.95]
+        self.pumpkins = [
+            ((i + 0.5 + rng.uniform(-0.2, 0.2)) * W / k, sizes[i % len(sizes)], rng.uniform(0, 6.28))
+            for i in range(k)
+        ]
 
-    def draw(self, fr, hour, kind, inten, t, bars=None, pulse=0.0):
+    def draw(self, fr, hour, kind, inten, t, bars=None, pulse=0.0, halloween=False):
         W, PH = self.W, self.PH
         top, bot = sky_colors(hour)
         dark = max(0.0, min(1.0, (70 - lum(top)) / 50))
@@ -854,7 +871,9 @@ class Scene:
                     px[y][x] = cols[layer]
 
         if bars:
-            self._bars(fr, bars, tbot, dark)
+            self._bars(fr, bars, tbot, dark, halloween)
+        if halloween:
+            self._pumpkins(fr, t)
 
         # precipitation
         if kind in ("rain", "storm"):
@@ -871,7 +890,7 @@ class Scene:
                 x = (x0 + 2.5 * math.sin(t * 0.7 + ph)) % W
                 fr.put(int(x), int(y), (245, 248, 255), 0.85)
 
-    def _bars(self, fr, bars, tbot, dark):
+    def _bars(self, fr, bars, tbot, dark, halloween=False):
         """Equaliser bars rising from the bottom edge, coloured by the sky."""
         W, PH, px = self.W, self.PH, fr.px
         n = len(bars)
@@ -884,6 +903,9 @@ class Scene:
             base = mix(base, (140, 170, 255), 0.4 * dark)
         tip = mix(base, (255, 255, 255), 0.7)
         cols = [mix(base, tip, y / maxh) for y in range(maxh + 1)]
+        if halloween:  # black at the bottom, glowing orange at the top
+            tip = (255, 190, 70)
+            cols = [mix((12, 6, 4), (255, 120, 8), (y / maxh) ** 0.8) for y in range(maxh + 1)]
         for i, h in enumerate(bars):
             hp = int(h * maxh)
             x0 = margin + i * slot
@@ -894,10 +916,67 @@ class Scene:
                         row[x0 + dx] = c
             for dx in range(bw):
                 if hp > 0:
-                    fr.put(x0 + dx, PH - 1 - hp, (255, 255, 255), 0.8)
+                    fr.put(x0 + dx, PH - 1 - hp, tip if halloween else (255, 255, 255), 0.8)
                     fr.put(x0 + dx, PH - 2 - hp, tip, 0.3)
                 else:
                     fr.put(x0 + dx, PH - 1, tip, 0.35)
+
+    def _pumpkins(self, fr, t):
+        """A patch of glowing jack-o'-lanterns along the bottom edge."""
+        W, PH, px = self.W, self.PH, fr.px
+        r0 = PH * 0.066
+        for cx, size, ph in self.pumpkins:
+            r = max(3, min(11, round(r0 * size)))
+            rx, ry, cx = int(r * 1.3), r, int(cx)
+            base = PH - 2
+            cy = base - ry
+            flicker = 0.5 + 0.5 * math.sin(t * 7 + ph) * math.sin(t * 3.1 + ph * 2)
+            glow = mix((255, 150, 25), (255, 238, 130), flicker)
+
+            def paint(x, y, c):
+                if 0 <= x < W and 0 <= y < PH:
+                    px[y][x] = c
+
+            for y in range(cy - ry, base + 1):  # round body with ribs
+                for x in range(cx - rx, cx + rx + 1):
+                    nx, ny = (x - cx) / rx, (y - cy) / ry
+                    d = nx * nx + ny * ny
+                    if d <= 1.0:
+                        sh = (0.80 + 0.20 * abs(math.cos(nx * math.pi * 1.6))) * (1.0 - 0.35 * d * d)
+                        paint(x, y, (int(255 * sh), int(112 * sh), int(10 * sh)))
+
+            sw = max(1, rx // 4)  # stem
+            for y in range(cy - ry - max(2, r // 3), cy - ry + 1):
+                for x in range(cx - sw // 2, cx - sw // 2 + sw + 1):
+                    paint(x, y, (58, 98, 26))
+            paint(cx + sw, cy - ry - max(2, r // 3), (58, 98, 26))
+
+            def carve(x, y):  # light shining out through the face
+                nx, ny = (x - cx) / rx, (y - cy) / ry
+                if nx * nx + ny * ny <= 1.0:
+                    paint(x, y, glow)
+
+            s_ = max(2, int(r * 0.38))
+            eye_dx, eye_y = int(rx * 0.42), int(cy - ry * 0.18)
+            for ex in (cx - eye_dx, cx + eye_dx):  # triangle eyes
+                for y in range(eye_y - s_, eye_y + 1):
+                    half = (y - (eye_y - s_)) / s_ * s_ * 0.95
+                    for x in range(int(ex - half), int(ex + half) + 1):
+                        carve(x, y)
+            ns = max(1, s_ // 2)  # nose
+            for y in range(int(cy + ry * 0.10) - ns, int(cy + ry * 0.10) + 1):
+                half = (y - (int(cy + ry * 0.10) - ns)) / ns * ns * 0.9
+                for x in range(int(cx - half), int(cx + half) + 1):
+                    carve(x, y)
+            th = max(1, int(r * 0.28))  # toothy grin
+            span = int(rx * 0.62)
+            for x in range(cx - span, cx + span + 1):
+                u = (x - cx) / max(1, span)
+                if abs(u) < 0.85 and (x - cx) % 3 == 0:
+                    continue  # a tooth
+                ym = int(cy + ry * (0.52 - 0.26 * u * u))
+                for y in range(ym - th // 2, ym - th // 2 + th):
+                    carve(x, y)
 
 
 # --------------------------------------------------------------------------
@@ -937,15 +1016,24 @@ def build_lines(st, now, W, cfg, big, days, footer, icon):
 
     hhmm = now.strftime("%I:%M").lstrip("0") if cfg["h12"] else now.strftime("%H:%M")
     ampm = now.strftime("%p") if cfg["h12"] else ""
+    boo = bool(cfg.get("halloween"))
     if big:
         scale = 2 if inner >= 36 else 1
-        rows = big_text(hhmm, scale)
+        rows = big_text("BOO?" if boo else hhmm, scale)
+        flicker = mix((190, 190, 190), WHITE, 0.5 + 0.5 * math.sin(time.monotonic() * 6)) if boo else WHITE
         for i, r in enumerate(rows):
+            if boo:
+                L.append([seg(r, flicker, True)])
+                continue
             tail = ("  " + ampm) if (i == 4 and ampm) else ("    " if ampm else "")
             L.append([seg(r, WHITE, True), seg(tail, DIM, True)])
+    elif boo:
+        L.append([seg("B O O ?", WHITE, True)])
     else:
         L.append([seg(" ".join(hhmm) + (" " + ampm if ampm else ""), WHITE, True)])
     L.append([])
+    if boo:  # the clock is hiding, so show the time as plain text
+        L.append([seg(hhmm + (" " + ampm if ampm else ""), WHITE, True)])
     L.append([seg(f"{now:%A}, {now.day} {now:%B} {now.year}", BLUE)])
     L.append([])
 
@@ -997,10 +1085,11 @@ def build_lines(st, now, W, cfg, big, days, footer, icon):
     if footer:
         L.append([])
         if inner >= 40:
-            L.append([seg("q quit \u00b7 u units \u00b7 t clock \u00b7 r refresh", (110, 120, 145))])
-            L.append([seg("p processes \u00b7 m now playing \u00b7 v visualiser", (110, 120, 145))])
+            L.append([seg("q quit \u00b7 u units \u00b7 t clock", (110, 120, 145))])
+            L.append([seg("p processes \u00b7 m now playing", (110, 120, 145))])
+            L.append([seg("v visualiser \u00b7 r refresh \u00b7 b boo?", (110, 120, 145))])
         else:
-            L.append([seg("q quit \u00b7 p procs \u00b7 m music", (110, 120, 145))])
+            L.append([seg("q quit \u00b7 p procs \u00b7 m music \u00b7 b boo", (110, 120, 145))])
     L.append([])
     return L
 
@@ -1280,7 +1369,8 @@ def compose(W, H, st, cfg, scene, t):
         pulse = sum(bars[:k]) / k
 
     fr = Frame(W, H)
-    scene.draw(fr, hour, kind, inten, t, bars, pulse)
+    fr.halloween = bool(cfg.get("halloween"))
+    scene.draw(fr, hour, kind, inten, t, bars, pulse, fr.halloween)
     draw_panels(fr, st, now, cfg, pulse, t)
     if cfg.get("viz") and st.audio.err and not st.audio.demo:
         msg = "\u266a " + st.audio.err
@@ -1296,7 +1386,7 @@ CONF = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "daw
 
 
 def load_config():
-    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "procs": False, "media": False, "sort": "cpu"}
+    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "procs": False, "media": False, "halloween": False, "sort": "cpu"}
     try:
         saved = json.loads(CONF.read_text())
         panel = saved.pop("panel", None)  # dawn 1.2 had a single side panel
@@ -1374,6 +1464,8 @@ def run(cfg):
                     toggle("procs")
                 elif data == b"m":
                     toggle("media")
+                elif data == b"b":
+                    cfg["halloween"] = not cfg["halloween"]
                 elif data == b"v":
                     cfg["viz"] = not cfg["viz"]
                     apply()
@@ -1423,7 +1515,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog="dawn",
         description="A beautiful weather, time & date dashboard for your terminal.",
-        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
+        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 v visualiser \u00b7 s sort \u00b7 b boo \u00b7 r refresh",
     )
     p.add_argument("-c", "--city", help='show this place instead of auto-detecting, e.g. --city "Tokyo"')
     p.add_argument("-u", "--units", choices=["c", "f"], help="temperature units: c (Celsius) or f (Fahrenheit)")
@@ -1432,13 +1524,14 @@ def main(argv=None):
     p.add_argument("--procs", action=argparse.BooleanOptionalAction, help="show the process viewer (right)")
     p.add_argument("--media", action=argparse.BooleanOptionalAction, help="show the Now Playing panel (left)")
     p.add_argument("--viz", action=argparse.BooleanOptionalAction, help="show the audio visualiser")
+    p.add_argument("--halloween", action=argparse.BooleanOptionalAction, help="start in Halloween mode (boo?)")
     p.add_argument("--save", action="store_true", help="remember these options for next time")
     p.add_argument("--once", action="store_true", help="print one frame and exit (handy for screenshots)")
     p.add_argument("-v", "--version", action="version", version=f"dawn {__version__}")
     a = p.parse_args(argv)
 
     cfg = load_config()
-    for k in ("city", "units", "h12", "procs", "media", "viz"):
+    for k in ("city", "units", "h12", "procs", "media", "viz", "halloween"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
 

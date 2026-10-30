@@ -15,6 +15,7 @@ Open a terminal, type `dawn`, and get a living sky behind a big clock, today's d
 - **Two optional side panels**, which you can open at the same time as the clock:
   - **Now Playing** (on the left): the song, artist and progress of whatever is playing, and which app it's playing from
   - **Processes** (on the right, like a mini htop): CPU and memory gauges, a CPU history graph and the busiest programs
+- **Halloween mode** (press `b`): the clock turns into a glowing orange "BOO?", pumpkins light up along the bottom, and the visualiser goes black and orange
 - Finds your location automatically, or pick any city
 - Celsius or Fahrenheit, 12-hour or 24-hour clock
 - No account and no API key
@@ -98,6 +99,7 @@ These make the two music features work. Everything else works without them.
 | `q` | Quit |
 | `u` | Switch between °C and °F |
 | `t` | Switch between 12-hour and 24-hour clock |
+| `b` | Halloween mode on or off ("BOO?", orange, pumpkins) |
 | `v` | Show or hide the audio visualiser |
 | `p` | Open or close the **Processes** panel (right) |
 | `m` | Open or close the **Now Playing** panel (left) |
@@ -115,6 +117,7 @@ dawn --media              # start with the Now Playing panel open
 dawn --procs              # start with the process viewer open
 dawn --media --procs      # start with both open
 dawn --no-viz             # start without the audio visualiser
+dawn --halloween          # start in Halloween mode
 dawn --city Paris --units c --24h --save   # remember these choices
 ```
 
@@ -137,6 +140,17 @@ Press `p` to open a frosted-glass panel on the right of the clock. It shows CPU 
 Press `m` to open a panel on the left of the clock showing what's playing right now: the song title (long titles scroll), the artist, the album, a progress bar, and **which app it's playing from** (Spotify, Firefox, VLC and so on). If several players are open it shows the one that's playing, and tells you how many others there are.
 
 It works with any player that reports what it's playing to your desktop. That includes Spotify, Firefox, Chromium-based browsers (Chrome, Brave and others), VLC, Rhythmbox and many more. mpv needs the `mpv-mpris` add-on to report anything. It needs the `playerctl` helper from "Optional extras".
+
+## Halloween mode
+
+Press `b` and dawn gets spooky:
+
+- The big clock turns into a flickering **BOO?** (the real time moves to a line just below it)
+- All the text turns orange
+- A patch of glowing jack-o'-lanterns sits along the bottom of the screen, their faces flickering like candles
+- The audio visualiser turns black and orange
+
+Press `b` again to go back to normal. Use `dawn --halloween` to start in Halloween mode, and add `--save` to keep it that way.
 
 ## Window size
 
