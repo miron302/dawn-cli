@@ -1085,11 +1085,10 @@ def build_lines(st, now, W, cfg, big, days, footer, icon):
     if footer:
         L.append([])
         if inner >= 40:
-            L.append([seg("q quit \u00b7 u units \u00b7 t clock", (110, 120, 145))])
-            L.append([seg("p processes \u00b7 m now playing", (110, 120, 145))])
-            L.append([seg("v visualiser \u00b7 r refresh \u00b7 b boo?", (110, 120, 145))])
+            L.append([seg("q quit \u00b7 u units \u00b7 t clock \u00b7 r refresh", (110, 120, 145))])
+            L.append([seg("p processes \u00b7 m now playing \u00b7 v visualiser", (110, 120, 145))])
         else:
-            L.append([seg("q quit \u00b7 p procs \u00b7 m music \u00b7 b boo", (110, 120, 145))])
+            L.append([seg("q quit \u00b7 p procs \u00b7 m music", (110, 120, 145))])
     L.append([])
     return L
 
@@ -1464,8 +1463,6 @@ def run(cfg):
                     toggle("procs")
                 elif data == b"m":
                     toggle("media")
-                elif data == b"b":
-                    cfg["halloween"] = not cfg["halloween"]
                 elif data == b"v":
                     cfg["viz"] = not cfg["viz"]
                     apply()
@@ -1515,7 +1512,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog="dawn",
         description="A beautiful weather, time & date dashboard for your terminal.",
-        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 v visualiser \u00b7 s sort \u00b7 b boo \u00b7 r refresh",
+        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
     )
     p.add_argument("-c", "--city", help='show this place instead of auto-detecting, e.g. --city "Tokyo"')
     p.add_argument("-u", "--units", choices=["c", "f"], help="temperature units: c (Celsius) or f (Fahrenheit)")
