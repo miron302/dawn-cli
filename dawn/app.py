@@ -1,11 +1,13 @@
 """dawn - a beautiful weather, time & date dashboard for your terminal."""
 
 import argparse
+import bisect
 import cmath
 import json
 import math
 import os
 import random
+import re
 import select
 import shutil
 import signal
@@ -16,6 +18,7 @@ import threading
 import time
 import tty
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from array import array
@@ -658,6 +661,166 @@ class MediaMon:
                 self.stop.wait(0.2)
 
 
+# --------------------------------------------------------------------------
+# Lyrics (time-synced lines from LRCLIB, a free community lyrics database)
+# --------------------------------------------------------------------------
+
+LRCLIB = os.environ.get("DAWN_LRCLIB_URL", "https://lrclib.net").rstrip("/")
+_LRC_TIME = re.compile(r"\[(\d{1,3}):(\d{2}(?:[.:]\d{1,3})?)\]")
+_LRC_WORD = re.compile(r"<\d+:\d+(?:[.:]\d+)?>")
+
+
+def parse_lrc(text):
+    """Turn LRC text ("[01:23.45] some words") into a sorted list of (seconds, line)."""
+    lines = []
+    for raw in text.splitlines():
+        stamps = _LRC_TIME.findall(raw)
+        if not stamps:  # tags like [ar:Someone] have no time
+            continue
+        words = clean_text(_LRC_WORD.sub("", _LRC_TIME.sub("", raw)))
+        for minutes, seconds in stamps:
+            lines.append((int(minutes) * 60 + float(seconds.replace(":", ".")), words))
+    lines.sort(key=lambda x: x[0])
+    return lines
+
+
+def lrclib_json(path, params, timeout=8):
+    req = urllib.request.Request(
+        f"{LRCLIB}{path}?{urllib.parse.urlencode(params)}",
+        headers={"User-Agent": f"dawn-cli/{__version__} (https://github.com/miron302/dawn-cli)"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def fetch_lyrics(artist, title, album, duration):
+    """Look a song up. Returns ("ok", lines), ("instrumental", []) or ("none", []).
+    Raises when the service can't be reached."""
+    if artist and title and album and duration:
+        try:
+            d = lrclib_json("/api/get", {"track_name": title, "artist_name": artist,
+                                         "album_name": album, "duration": duration})
+            if d.get("instrumental"):
+                return "instrumental", []
+            lines = parse_lrc(d.get("syncedLyrics") or "")
+            if lines:
+                return "ok", lines
+        except urllib.error.HTTPError as e:
+            if e.code >= 500:
+                raise
+    params = {"track_name": title}
+    if artist:
+        params["artist_name"] = artist
+    best, best_gap = None, None
+    results = lrclib_json("/api/search", params)
+    for d in results if isinstance(results, list) else []:
+        if not d.get("syncedLyrics"):
+            continue
+        gap = abs((d.get("duration") or 0) - duration) if duration else 0
+        if duration and gap > 5:
+            continue  # a different recording
+        if best is None or gap < best_gap:
+            best, best_gap = d, gap
+    if best:
+        lines = parse_lrc(best["syncedLyrics"])
+        if lines:
+            return "ok", lines
+    return "none", []
+
+
+def lyrics_cache_path():
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "dawn" / "lyrics.json"
+
+
+def track_of(p):
+    """What identifies a song: (artist, title, album, whole seconds)."""
+    if not p or not p["title"]:
+        return None
+    return (p["artist"], p["title"], p["album"], round(p["len"] / 1e6) if p["len"] else 0)
+
+
+def track_key(track):
+    return None if track is None else "\x1f".join(str(x) for x in track).lower()
+
+
+class LyricsMon:
+    """Looks up lyrics for whatever Now Playing is showing, in the background."""
+
+    MISS_DAYS = 1  # look again for songs that had no lyrics after this long
+
+    def __init__(self, media):
+        self.media = media
+        self.enabled = threading.Event()
+        self.stop = threading.Event()
+        self.key, self.status, self.lines, self.times = None, "idle", [], []
+        self.retry_at = 0.0
+        try:
+            self.cache = json.loads(lyrics_cache_path().read_text())
+        except Exception:
+            self.cache = {}
+
+    def _set(self, status, lines):
+        self.lines = [(t, w) for t, w in lines]
+        self.times = [t for t, _ in lines]
+        self.status = status
+
+    def view(self, p):
+        """(status, lines) for this player's song, or "loading" if we're not there yet."""
+        if track_key(track_of(p)) != self.key:
+            return "loading", []
+        return self.status, self.lines
+
+    def _save(self):
+        try:
+            keep = sorted(self.cache.items(), key=lambda kv: kv[1]["ts"], reverse=True)[:300]
+            self.cache = dict(keep)
+            path = lyrics_cache_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.cache))
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+    def _lookup(self, key, track):
+        hit = self.cache.get(key)
+        if hit and (hit["status"] == "ok" or time.time() - hit["ts"] < self.MISS_DAYS * 86400):
+            self._set(hit["status"], [tuple(x) for x in hit["lines"]])
+            return
+        self._set("loading", [])
+        try:
+            status, lines = fetch_lyrics(*track)
+        except Exception:
+            self.retry_at = time.monotonic() + 30
+            self._set("error", [])
+            return
+        self.cache[key] = {"ts": time.time(), "status": status, "lines": [list(x) for x in lines]}
+        self._save()
+        self._set(status, lines)
+
+    def set_demo(self, p, lines):
+        self.key = track_key(track_of(p))
+        self._set("ok", lines)
+
+    def loop(self):
+        while not self.stop.is_set():
+            if self.enabled.is_set() and self.media.ready and not self.media.missing:
+                p, _ = self.media.current()
+                track = track_of(p)
+                key = track_key(track)
+                if self.status == "error" and time.monotonic() >= self.retry_at:
+                    self.key = None  # try again
+                if key != self.key:
+                    self.key = key
+                    if key is None:
+                        self._set("idle", [])
+                    else:
+                        self._lookup(key, track)
+            elif not self.enabled.is_set():
+                self.key = None
+            self.stop.wait(0.4)
+
+
 class State:
     def __init__(self):
         self.place = None
@@ -669,6 +832,7 @@ class State:
         self.audio = Audio()
         self.sysmon = SysMon()
         self.media = MediaMon()
+        self.lyrics = LyricsMon(self.media)
         self.recent = []  # side panels, most recently opened first
 
 
@@ -1191,14 +1355,18 @@ def fmt_time(sec):
     return f"{h}:{m:02d}:{s_:02d}" if h else f"{m}:{s_:02d}"
 
 
-def scroll(text, width, t, animate):
-    """Centre text that fits; scroll it (like a car stereo) when it's too long."""
+def scroll(text, width, t, animate, elapsed=None):
+    """Centre text that fits; scroll it (like a car stereo) when it's too long.
+    With `elapsed` (seconds since the line began) it starts at the beginning, waits a moment, then scrolls."""
     if str_width(text) <= width:
         return pad(text, width, "^")
     if not animate:
         return pad(clip(text, width), width, "^")
     loop = text + "   \u2022   "
-    off = int(t * 5) % len(loop)
+    if elapsed is not None:
+        off = 0 if elapsed < 1.5 else int((elapsed - 1.5) * 5) % len(loop)
+    else:
+        off = int(t * 5) % len(loop)
     out, w = [], 0
     for ch in (loop + loop)[off:]:
         c = cw(ch)
@@ -1209,7 +1377,48 @@ def scroll(text, width, t, animate):
     return pad("".join(out), width)
 
 
-def build_media_lines(mm, H, t):
+def lyric_lines(lm, p, pos, t, n):
+    """n lines of lyrics, with the line being sung now in the middle."""
+    blank = [seg(" " * TW)]
+    status, lines = lm.view(p)
+    mid = n // 2
+
+    def note(text):
+        out = [blank] * n
+        out[mid] = [seg(pad(text, TW, "^"), DIM)]
+        return out
+
+    if status == "loading" or status == "idle":
+        return note("Fetching lyrics\u2026")
+    if status == "error":
+        return note("Couldn't reach the lyrics service")
+    if status == "instrumental":
+        return note("\u266a Instrumental \u266a")
+    if status == "none" or not lines:
+        return note("No synced lyrics found")
+    if pos is None:
+        return note("This player doesn't report its position")
+    idx = bisect.bisect_right(lm.times, pos) - 1
+    out = []
+    for i in range(n):
+        j = idx - mid + i
+        if j < 0 and not (j == -1 and idx == -1):
+            out.append(blank)
+            continue
+        if j >= len(lines):
+            out.append(blank)
+            continue
+        text = "\u266a" if j == -1 else (lines[j][1] or "\u266a")
+        dist = abs(j - idx)
+        if dist == 0:
+            since = pos - lm.times[idx] if idx >= 0 else 0.0
+            out.append([seg(scroll(text, TW, t, True, since), WHITE, True)])
+        else:
+            out.append([seg(pad(clip(text, TW), TW, "^"), DIM if dist == 1 else HINT)])
+    return out
+
+
+def build_media_lines(mm, H, t, lm=None):
     L = [[]] + panel_title("NOW PLAYING") + [[]]
     p, others = mm.current() if mm.ready and not mm.missing else (None, 0)
     if mm.missing:
@@ -1246,11 +1455,18 @@ def build_media_lines(mm, H, t):
                 L.append([seg(fmt_time(pos) + " " * (TW - len(fmt_time(pos)) - len(right)) + right, DIM)])
             else:
                 L.append([seg(fmt_time(pos).center(TW), DIM)])
+        if lm is not None:
+            below = (2 if others else 0) + 3  # lines that follow the lyrics
+            room = H - 2 - len(L) - below - 1  # minus one for the gap above them
+            n = 5 if room >= 5 else 3 if room >= 3 else 1 if room >= 1 else 0
+            if n:
+                L.append([])
+                L.extend(lyric_lines(lm, p, pos, t, n))
         if others:
             L.append([])
             L.append([seg(f"+{others} other player{'s' if others > 1 else ''}".center(TW), HINT)])
     L.append([])
-    L.append([seg("m to close".center(TW), HINT)])
+    L.append([seg("m to close \u00b7 l lyrics".center(TW), HINT)])
     L.append([])
     return shrink(L, H)
 
@@ -1297,7 +1513,7 @@ def draw_panels(fr, st, now, cfg, pulse, t=0.0):
     order = [k for k in st.recent if k in enabled] + [k for k in enabled if k not in st.recent]
     side = {}
     if "media" in enabled:
-        side["media"] = build_media_lines(st.media, H, t)
+        side["media"] = build_media_lines(st.media, H, t, st.lyrics if cfg.get("lyrics") else None)
     if "procs" in enabled:
         side["procs"] = build_proc_lines(st.sysmon, H, cfg)
 
@@ -1385,7 +1601,7 @@ CONF = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "daw
 
 
 def load_config():
-    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "procs": False, "media": False, "halloween": False, "sort": "cpu"}
+    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "procs": False, "media": False, "lyrics": True, "halloween": False, "sort": "cpu"}
     try:
         saved = json.loads(CONF.read_text())
         panel = saved.pop("panel", None)  # dawn 1.2 had a single side panel
@@ -1406,6 +1622,7 @@ def run(cfg):
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     threading.Thread(target=st.sysmon.loop, daemon=True).start()
     threading.Thread(target=st.media.loop, daemon=True).start()
+    threading.Thread(target=st.lyrics.loop, daemon=True).start()
 
     def apply():
         if cfg["procs"]:
@@ -1416,6 +1633,10 @@ def run(cfg):
             st.media.enabled.set()
         else:
             st.media.enabled.clear()
+        if cfg["media"] and cfg["lyrics"]:
+            st.lyrics.enabled.set()
+        else:
+            st.lyrics.enabled.clear()
         if cfg["viz"]:
             st.audio.start()
         else:
@@ -1463,6 +1684,9 @@ def run(cfg):
                     toggle("procs")
                 elif data == b"m":
                     toggle("media")
+                elif data == b"l":
+                    cfg["lyrics"] = not cfg["lyrics"]
+                    apply()
                 elif data == b"v":
                     cfg["viz"] = not cfg["viz"]
                     apply()
@@ -1474,6 +1698,7 @@ def run(cfg):
         st.stop.set()
         st.sysmon.stop.set()
         st.media.stop.set()
+        st.lyrics.stop.set()
         st.audio.stop()
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         out.write("\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l")
@@ -1502,6 +1727,11 @@ def once(cfg):
                                  "album": "Hurry Up, We're Dreaming", "pos": 83_000_000, "len": 243_000_000,
                                  "at": time.monotonic()}]
         st.media.ready = True
+        if cfg["lyrics"]:  # a made-up sample, so the screenshot shows what lyrics look like
+            sample = ["Synced lyrics show up here,", "one line at a time,", "right as it is sung,",
+                      "with the current line lit up,", "and the next ones coming in below."]
+            st.lyrics.set_demo(st.media.players[0], [(60 + 5 * i, w) for i, w in enumerate(sample)])
+            st.media.players[0]["pos"] = 71_000_000
     sz = shutil.get_terminal_size((100, 32))
     scene = Scene(sz.columns, sz.lines)
     fr = compose(sz.columns, sz.lines, st, cfg, scene, 3.0)
@@ -1512,7 +1742,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog="dawn",
         description="A beautiful weather, time & date dashboard for your terminal.",
-        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
+        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 l lyrics \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
     )
     p.add_argument("-c", "--city", help='show this place instead of auto-detecting, e.g. --city "Tokyo"')
     p.add_argument("-u", "--units", choices=["c", "f"], help="temperature units: c (Celsius) or f (Fahrenheit)")
@@ -1521,6 +1751,7 @@ def main(argv=None):
     p.add_argument("--procs", action=argparse.BooleanOptionalAction, help="show the process viewer (right)")
     p.add_argument("--media", action=argparse.BooleanOptionalAction, help="show the Now Playing panel (left)")
     p.add_argument("--viz", action=argparse.BooleanOptionalAction, help="show the audio visualiser")
+    p.add_argument("--lyrics", action=argparse.BooleanOptionalAction, help="show synced lyrics in Now Playing (looked up on lrclib.net)")
     p.add_argument("--halloween", action=argparse.BooleanOptionalAction, help="start in Halloween mode (boo?)")
     p.add_argument("--save", action="store_true", help="remember these options for next time")
     p.add_argument("--once", action="store_true", help="print one frame and exit (handy for screenshots)")
@@ -1528,7 +1759,7 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     cfg = load_config()
-    for k in ("city", "units", "h12", "procs", "media", "viz", "halloween"):
+    for k in ("city", "units", "h12", "procs", "media", "lyrics", "viz", "halloween"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
 

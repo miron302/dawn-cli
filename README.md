@@ -13,7 +13,7 @@ Open a terminal, type `dawn`, and get a living sky behind a big clock, today's d
 - Animated sky: sun, moon, twinkling stars, drifting clouds, rain, snow and lightning
 - **Audio visualiser** (like cava): glowing bars rise out of the scene and dance to whatever you're playing
 - **Two optional side panels**, which you can open at the same time as the clock:
-  - **Now Playing** (on the left): the song, artist and progress of whatever is playing, and which app it's playing from
+  - **Now Playing** (on the left): the song, artist and progress of whatever is playing, which app it's playing from, and **synced lyrics** that follow along line by line
   - **Processes** (on the right, like a mini htop): CPU and memory gauges, a CPU history graph and the busiest programs
 - **Halloween mode** (start it with `dawn --halloween`): the clock turns into a glowing orange "BOO?", pumpkins light up along the bottom, and the visualiser goes black and orange
 - Finds your location automatically, or pick any city
@@ -102,6 +102,7 @@ These make the two music features work. Everything else works without them.
 | `v` | Show or hide the audio visualiser |
 | `p` | Open or close the **Processes** panel (right) |
 | `m` | Open or close the **Now Playing** panel (left) |
+| `l` | Show or hide the lyrics in the Now Playing panel |
 | `s` | Sort processes by CPU or memory |
 | `r` | Refresh the weather now |
 
@@ -115,6 +116,7 @@ dawn --12h                # 12-hour clock
 dawn --media              # start with the Now Playing panel open
 dawn --procs              # start with the process viewer open
 dawn --media --procs      # start with both open
+dawn --no-lyrics          # no lyrics (and no lyrics lookups at all)
 dawn --no-viz             # start without the audio visualiser
 dawn --halloween          # start in Halloween mode
 dawn --city Paris --units c --24h --save   # remember these choices
@@ -137,6 +139,15 @@ Press `p` to open a frosted-glass panel on the right of the clock. It shows CPU 
 ## Now Playing
 
 Press `m` to open a panel on the left of the clock showing what's playing right now: the song title (long titles scroll), the artist, the album, a progress bar, and **which app it's playing from** (Spotify, Firefox, VLC and so on). If several players are open it shows the one that's playing, and tells you how many others there are.
+
+### Lyrics
+
+When a song has synced lyrics, they show under the progress bar, with the line being sung right now in bold in the middle, the lines just before it and after it dimmed, and a ♪ during instrumental breaks. They move along with the song, and freeze when you pause. Long lines scroll. On a short window you see fewer lines, and below a certain height they're hidden to make room.
+
+- Lyrics come from [LRCLIB](https://lrclib.net), a free community database, so not every song has them. Newer and more popular songs are the most likely to. Songs without time-stamped lyrics show "No synced lyrics found".
+- Matching is by the song's title, artist, album and length. Videos and tracks from a browser often have messy titles, so those match less often.
+- Press `l` to hide the lyrics. While they're hidden, dawn doesn't look anything up. `dawn --no-lyrics --save` turns them off for good.
+- Lyrics you've seen are remembered in `~/.cache/dawn/lyrics.json` (the last 300 songs), so a song is only looked up once. You can delete that file at any time.
 
 It works with any player that reports what it's playing to your desktop. That includes Spotify, Firefox, Chromium-based browsers (Chrome, Brave and others), VLC, Rhythmbox and many more. mpv needs the `mpv-mpris` add-on to report anything. It needs the `playerctl` helper from "Optional extras".
 
@@ -193,6 +204,12 @@ Install the audio helper from "Optional extras", then restart dawn.
 **Now Playing says "playerctl isn't installed"**
 Install it from "Optional extras", then restart dawn.
 
+**Lyrics say "No synced lyrics found"**
+LRCLIB doesn't have time-stamped lyrics for that song, or the title in your player doesn't match closely enough (common for YouTube and other videos). Try a song from a normal music app to check that lyrics work.
+
+**Lyrics say "Couldn't reach the lyrics service"**
+Check your internet connection. dawn tries again by itself after half a minute.
+
 **Now Playing says "Nothing is playing" but music is on**
 The app has to report what it's playing. Most do. If yours doesn't, `playerctl -l` lists the players dawn can see, and an empty list means your app isn't reporting. A player that has nothing loaded is skipped.
 
@@ -209,12 +226,13 @@ Make the terminal window bigger. dawn adapts to any size, and a larger window sh
 
 ## Privacy
 
-dawn does not collect anything and has no tracking. To work, it talks to two free public services:
+dawn does not collect anything and has no tracking. To work, it talks to these free public services:
 
 - [Open-Meteo](https://open-meteo.com/) for the weather (and to look up a city name)
 - [ipwho.is](https://ipwho.is/) to guess your city from your IP address (skipped when you use `--city`)
+- [LRCLIB](https://lrclib.net) for lyrics, **only while the Now Playing panel is open and lyrics are on**. To find lyrics it sends the current song's title, artist, album and length (plus the usual details any web request carries, like your IP address). Press `l` or use `--no-lyrics` and it sends nothing.
 
-The audio visualiser, process viewer and Now Playing panel run entirely on your computer and send nothing anywhere.
+The audio visualiser and process viewer run entirely on your computer and send nothing anywhere. The Now Playing panel itself does too, apart from the lyrics lookups above.
 
 ---
 
