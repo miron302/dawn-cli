@@ -16,6 +16,7 @@ Open a terminal, type `dawn`, and get a living sky behind a big clock, today's d
   - **Now Playing** (on the left): the song, artist and progress of whatever is playing, which app it's playing from, and **synced lyrics** that follow along line by line
   - **Processes** (on the right, like a mini htop): CPU and memory gauges, a CPU history graph and the busiest programs
 - **Halloween mode** (start it with `dawn --halloween`): the clock turns into a glowing orange "BOO?", pumpkins light up along the bottom, and the visualiser goes black and orange
+- **Christmas mode** (press `c`, or start it with `dawn --christmas`): falling snow, a garland with holly and twinkling lights, a rare visit from Santa's sleigh, presents in the snow, and a red and green visualiser
 - Finds your location automatically, or pick any city
 - Celsius or Fahrenheit, 12-hour or 24-hour clock
 - No account and no API key
@@ -103,6 +104,7 @@ These make the two music features work. Everything else works without them.
 | `p` | Open or close the **Processes** panel (right) |
 | `m` | Open or close the **Now Playing** panel (left) |
 | `l` | Show or hide the lyrics in the Now Playing panel |
+| `c` | Christmas mode on or off |
 | `s` | Sort processes by CPU or memory |
 | `r` | Refresh the weather now |
 
@@ -119,6 +121,7 @@ dawn --media --procs      # start with both open
 dawn --no-lyrics          # no lyrics (and no lyrics lookups at all)
 dawn --no-viz             # start without the audio visualiser
 dawn --halloween          # start in Halloween mode
+dawn --christmas          # start in Christmas mode (or just press c)
 dawn --city Paris --units c --24h --save   # remember these choices
 ```
 
@@ -165,6 +168,22 @@ dawn --halloween
 - The audio visualiser turns black and orange
 
 It's off unless you ask for it, and there's no key for it, so it never switches on by accident. To make it your default, add `--save`: `dawn --halloween --save`. To turn it back off for good: `dawn --no-halloween --save`.
+
+## Christmas mode
+
+For a festive screen, press `c` while dawn is running. Press it again to go back to normal. You can also start dawn in Christmas mode:
+
+```bash
+dawn --christmas
+```
+
+- **Snow** falls over the whole window all the time, in four kinds of flake (`.`, `*`, `❄` and `❅`) at different speeds for depth. It takes over from every weather effect: rain, storms, fog, clouds, the sun and moon and the tinted sky are all switched off. The weather in the panels is still the real weather, so you still see the real temperature and forecast.
+- **Decorations**: a garland with holly, red bows and berries across the top, strings of lights down both sides, and every panel's border turns into a string of twinkling Christmas lights. The lights pulse a little with the music.
+- **Presents** of different sizes, colours and ribbons sit in the snow along the bottom. They get more numerous as the window gets wider.
+- **Santa** flies across the top of the screen in his sleigh with two reindeer (the front one has a red nose), leaving a trail of sparkles. He turns up at random, a first time 30 to 90 seconds after Christmas mode goes on and after that about once every four minutes, never twice within a minute. Each flight takes about seven seconds. Nothing else stops while he flies, and he leaves nothing behind. Want to see him right away? Start dawn with `--santa-now` and he visits about a second and a half after Christmas mode goes on, whether you used the flag or the key.
+- **The visualiser** turns into alternating red and green bars, each fading from deep to bright. It reacts to the music exactly as before, and the bars rise from behind the presents so none of the movement is hidden.
+
+Christmas mode is off when dawn starts, unless you use `dawn --christmas`. To start in it every time, add `--save`: `dawn --christmas --save`. To undo that: `dawn --no-christmas --save`. If Christmas mode and Halloween mode are both on, Christmas wins, and Halloween comes back when you press `c` again.
 
 ## Window size
 
@@ -214,7 +233,7 @@ Check your internet connection. dawn tries again by itself after half a minute.
 The app has to report what it's playing. Most do. If yours doesn't, `playerctl -l` lists the players dawn can see, and an empty list means your app isn't reporting. A player that has nothing loaded is skipped.
 
 **Some symbols look like empty boxes**
-Install a font with good symbol coverage (for example DejaVu: `ttf-dejavu` on Arch, `dejavu-sans-fonts` on Fedora) and make sure your terminal uses it.
+(This includes the snowflakes `❄` and `❅` in Christmas mode.) Install a font with good symbol coverage (for example DejaVu: `ttf-dejavu` on Arch, `dejavu-sans-fonts` on Fedora) and make sure your terminal uses it.
 
 **A panel disappeared**
 The window is probably too narrow for everything that's open. Look for the "Widen the window" hint at the bottom, and make the window wider.
@@ -244,6 +263,7 @@ cd dawn-cli
 python -m dawn            # run straight from the source
 dawn --once               # print a single frame, handy for screenshots
 dawn --once --media       # same, with a sample track if nothing is playing
+dawn --once --christmas --santa-now   # one frame of Christmas mode with Santa on screen
 ```
 
 Pure Python 3.9+, standard library only. If `numpy` is installed, the visualiser uses it automatically to use a bit less CPU. Without it, a small built-in FFT does the job.

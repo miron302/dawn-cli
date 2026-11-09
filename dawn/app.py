@@ -3,6 +3,7 @@
 import argparse
 import bisect
 import cmath
+import gc
 import json
 import math
 import os
@@ -834,6 +835,7 @@ class State:
         self.media = MediaMon()
         self.lyrics = LyricsMon(self.media)
         self.recent = []  # side panels, most recently opened first
+        self.santa = Santa()
 
 
 def worker(st, city):
@@ -871,6 +873,7 @@ class Frame:
         self.W, self.H, self.PH = W, H, H * 2
         self.px = [None] * self.PH
         self.txt = {}
+        self.rects = []  # (x, y, w, h) of every panel, so effects can stay out of their way
         self.halloween = False
 
     def put(self, x, y, c, a):
@@ -895,34 +898,81 @@ class Frame:
                     self.txt[(x + 1, y)] = ("", fg, bold)
             x += w
 
+    def grid(self):
+        """Every cell as (character, foreground, background, bold). This is the one place that
+        decides what a cell looks like; rows() and paint() both build on it. Cells are flat tuples
+        that reuse the colours already in the pixel buffer, because this runs for every cell of
+        every frame and small allocations are what costs the time."""
+        px = self.px
+        by_row = {}
+        for (x, y), v in self.txt.items():
+            by_row.setdefault(y, {})[x] = v
+        halloween = self.halloween
+        out = []
+        for y in range(self.H):
+            top_row, bot_row = px[2 * y], px[2 * y + 1]
+            row = [("\u2580", t, b, False) for t, b in zip(top_row, bot_row)]  # sky, snow, scenery
+            for x, (ch, fg, bold) in by_row.get(y, {}).items():  # then the text cells on top
+                row[x] = (ch, orange(fg) if halloween else fg, mix(top_row[x], bot_row[x], 0.5), bold)
+            out.append(row)
+        return out
+
     def rows(self, absolute=True):
         out = []
-        px, W = self.px, self.W
-        for y in range(self.H):
-            row = [f"\x1b[{y + 1};1H"] if absolute else []
+        for y, row in enumerate(self.grid()):
+            parts = [f"\x1b[{y + 1};1H"] if absolute else []
             last = None
-            top_row, bot_row = px[2 * y], px[2 * y + 1]
-            for x in range(W):
-                t = self.txt.get((x, y))
-                top, bot = top_row[x], bot_row[x]
-                if t:
-                    ch, fg, bold = t
-                    if self.halloween:
-                        fg = orange(fg)
-                    key = (fg, mix(top, bot, 0.5), bold)
-                else:
-                    ch = "\u2580"
-                    key = (top, bot, False)
+            for ch, fg, bg, bold in row:
+                key = (fg, bg, bold)
                 if key != last:
-                    f, b, bold = key
-                    row.append(
-                        "\x1b[0%s;38;2;%d;%d;%d;48;2;%d;%d;%dm"
-                        % (";1" if bold else "", f[0], f[1], f[2], b[0], b[1], b[2])
-                    )
+                    parts.append(sgr(key))
                     last = key
-                row.append(ch)
-            out.append("".join(row))
+                parts.append(ch)
+            out.append("".join(parts))
         return out
+
+
+def sgr(key):
+    f, b, bold = key
+    return "\x1b[0%s;38;2;%d;%d;%d;48;2;%d;%d;%dm" % (";1" if bold else "", f[0], f[1], f[2], b[0], b[1], b[2])
+
+
+def paint(grid, prev):
+    """The terminal output that turns the previous frame into this one. Only cells that changed are
+    sent (changes close together are joined into one run), so busy scenes stay cheap for the
+    terminal. With no previous frame (start, resize) everything is drawn."""
+    out = []
+    for y, row in enumerate(grid):
+        W = len(row)
+        old = prev[y] if prev is not None else None
+        runs = []
+        if old is None:
+            runs.append((0, W))
+        else:
+            changed = [x for x, (a, b) in enumerate(zip(row, old)) if a != b]
+            if not changed:
+                continue
+            start = last = changed[0]
+            for x in changed[1:]:
+                if x - last > 8:  # changes close together are joined into one run
+                    runs.append((start, last + 1))
+                    start = x
+                last = x
+            runs.append((start, last + 1))
+        for a, b in runs:
+            while a > 0 and row[a][0] == "":  # never start or stop in the middle of a wide character
+                a -= 1
+            while b < W and row[b][0] == "":
+                b += 1
+            out.append(f"\x1b[{y + 1};{a + 1}H")
+            last = None
+            for ch, fg, bg, bold in row[a:b]:
+                key = (fg, bg, bold)
+                if key != last:
+                    out.append(sgr(key))
+                    last = key
+                out.append(ch)
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
@@ -952,12 +1002,14 @@ class Scene:
         ]
         k = max(2, min(7, W // 26))
         sizes = [1.0, 0.7, 1.15, 0.85, 1.05, 0.7, 0.95]
+        self.tops = [[self._top(layer, x) for x in range(W)] for layer in range(len(self.hills))]  # hill outlines
+        self.xm = None  # Christmas geometry, built the first time it's needed
         self.pumpkins = [
             ((i + 0.5 + rng.uniform(-0.2, 0.2)) * W / k, sizes[i % len(sizes)], rng.uniform(0, 6.28))
             for i in range(k)
         ]
 
-    def draw(self, fr, hour, kind, inten, t, bars=None, pulse=0.0, halloween=False):
+    def draw(self, fr, hour, kind, inten, t, bars=None, pulse=0.0, halloween=False, christmas=False):
         W, PH = self.W, self.PH
         top, bot = sky_colors(hour)
         dark = max(0.0, min(1.0, (70 - lum(top)) / 50))
@@ -981,7 +1033,7 @@ class Scene:
             px[r] = [c] * W
 
         # stars
-        cover = {"clear": 1.0, "partly": 0.6, "cloud": 0.15, "fog": 0.1, "rain": 0.1, "snow": 0.1}.get(kind, 0.0)
+        cover = {"clear": 1.0, "partly": 0.6, "cloud": 0.15, "fog": 0.1, "rain": 0.1, "snow": 0.1, "xmas": 1.0}.get(kind, 0.0)
         if dark * cover > 0.02:
             for x, y, ph, sp in self.stars:
                 b = 0.55 + 0.45 * math.sin(t * sp + ph)
@@ -1025,19 +1077,22 @@ class Scene:
                                 fr.put(cx + int(ox) + dx, cy + int(oy) + dy, ccol, min(1.0, (1 - d) * 2.2) * 0.5)
 
         # rolling hills
-        gt = (200, 212, 232) if kind == "snow" else (6, 10, 22)
-        cols = (mix(tbot, gt, 0.5), mix(tbot, gt, 0.75)) if kind == "snow" else (mix(tbot, gt, 0.55), mix(tbot, gt, 0.82))
-        for layer, (p1, p2, f1, f2) in enumerate(self.hills):
-            base = PH * (0.17 - 0.07 * layer)
+        snowy = kind in ("snow", "xmas")
+        gt = (200, 212, 232) if snowy else (6, 10, 22)
+        cols = (mix(tbot, gt, 0.5), mix(tbot, gt, 0.75)) if snowy else (mix(tbot, gt, 0.55), mix(tbot, gt, 0.82))
+        for layer, tops in enumerate(self.tops):
             for x in range(W):
-                yt = int(PH - (base + PH * 0.03 * math.sin(x * f1 + p1) + PH * 0.02 * math.sin(x * f2 + p2)))
-                for y in range(max(0, yt), PH):
+                for y in range(max(0, tops[x]), PH):
                     px[y][x] = cols[layer]
 
+        if christmas and self.xm is None:
+            self._xmas_build()
         if bars:
-            self._bars(fr, bars, tbot, dark, halloween)
+            self._bars(fr, bars, tbot, dark, halloween, christmas)
         if halloween:
             self._pumpkins(fr, t)
+        if christmas:
+            self._xmas_draw(fr, t, pulse)
 
         # precipitation
         if kind in ("rain", "storm"):
@@ -1047,14 +1102,15 @@ class Scene:
                 x = (x0 - t * sp * 0.2) % W
                 for i in range(ln):
                     fr.put(int(x + i * 0.2), int(y - i), RAIN_C, 0.5 * (1 - i / ln) + 0.15)
-        elif kind == "snow":
-            n = int(len(self.snow) * min(inten, 1.3) / 1.3)
+        elif kind in ("snow", "xmas"):
+            xm = kind == "xmas"  # Christmas: fewer, and slower flakes are fainter, for depth
+            n = int(len(self.snow) * min(inten, 1.3) / 1.3 * (0.5 if xm else 1.0))
             for x0, y0, sp, ph in self.snow[:n]:
                 y = (y0 + t * sp) % PH
                 x = (x0 + 2.5 * math.sin(t * 0.7 + ph)) % W
-                fr.put(int(x), int(y), (245, 248, 255), 0.85)
+                fr.put(int(x), int(y), (245, 248, 255), 0.3 + 0.55 * (sp - 4) / 7 if xm else 0.85)
 
-    def _bars(self, fr, bars, tbot, dark, halloween=False):
+    def _bars(self, fr, bars, tbot, dark, halloween=False, christmas=False):
         """Equaliser bars rising from the bottom edge, coloured by the sky."""
         W, PH, px = self.W, self.PH, fr.px
         n = len(bars)
@@ -1062,28 +1118,39 @@ class Scene:
         bw = max(1, slot - 1) if slot >= 2 else 1
         margin = (W - n * slot) // 2
         maxh = max(4, int(PH * 0.42))
+        gift_top = self.xm["gift_top"] if christmas else None  # presents hide the foot of each bar
         base = sat(tbot, 1.8)
         if dark > 0.4:
             base = mix(base, (140, 170, 255), 0.4 * dark)
         tip = mix(base, (255, 255, 255), 0.7)
-        cols = [mix(base, tip, y / maxh) for y in range(maxh + 1)]
+        colsets, tips = [[mix(base, tip, y / maxh) for y in range(maxh + 1)]], [tip]
         if halloween:  # black at the bottom, glowing orange at the top
-            tip = (255, 190, 70)
-            cols = [mix((12, 6, 4), (255, 120, 8), (y / maxh) ** 0.8) for y in range(maxh + 1)]
+            tips = [(255, 190, 70)]
+            colsets = [[mix((12, 6, 4), (255, 120, 8), (y / maxh) ** 0.8) for y in range(maxh + 1)]]
+        if christmas:  # alternating Christmas red and evergreen, each fading from deep to bright
+            tips = [(255, 150, 150), (170, 255, 190)]
+            colsets = [
+                [mix((112, 8, 24), (236, 36, 52), y / maxh) for y in range(maxh + 1)],
+                [mix((6, 72, 38), (36, 176, 86), y / maxh) for y in range(maxh + 1)],
+            ]
         for i, h in enumerate(bars):
-            hp = int(h * maxh)
+            shown = int(h * maxh)  # what the audio asks for
             x0 = margin + i * slot
+            # in Christmas mode the bar starts behind the presents, so what shows above them is exactly `shown`
+            lift = PH - min(gift_top[x] for x in range(max(0, x0), min(W, x0 + bw))) if gift_top and x0 < W else 0
+            hp = shown + lift
+            cols, tip = colsets[i % len(colsets)], tips[i % len(tips)]
             for y in range(hp):
-                row, c = px[PH - 1 - y], cols[y]
+                row, c = px[PH - 1 - y], cols[min(max(y - lift, 0), maxh)]
                 for dx in range(bw):
                     if 0 <= x0 + dx < W:
                         row[x0 + dx] = c
             for dx in range(bw):
-                if hp > 0:
-                    fr.put(x0 + dx, PH - 1 - hp, tip if halloween else (255, 255, 255), 0.8)
+                if shown > 0:
+                    fr.put(x0 + dx, PH - 1 - hp, tip if (halloween or christmas) else (255, 255, 255), 0.8)
                     fr.put(x0 + dx, PH - 2 - hp, tip, 0.3)
                 else:
-                    fr.put(x0 + dx, PH - 1, tip, 0.35)
+                    fr.put(x0 + dx, PH - 1 - lift, tip, 0.35)
 
     def _pumpkins(self, fr, t):
         """A patch of glowing jack-o'-lanterns along the bottom edge."""
@@ -1141,6 +1208,356 @@ class Scene:
                 ym = int(cy + ry * (0.52 - 0.26 * u * u))
                 for y in range(ym - th // 2, ym - th // 2 + th):
                     carve(x, y)
+
+    def _top(self, layer, x):
+        """Row (in half-block pixels) where this hill layer starts at column x."""
+        p1, p2, f1, f2 = self.hills[layer]
+        base = self.PH * (0.17 - 0.07 * layer)
+        return int(self.PH - (base + self.PH * 0.03 * math.sin(x * f1 + p1) + self.PH * 0.02 * math.sin(x * f2 + p2)))
+
+    def _xmas_build(self):
+        """Work out, once per window size, everything that doesn't move: the garland, holly,
+        side light strings and presents (as a flat list of pixels), plus where the lights,
+        sparkles and flakes are. Per frame we only replay the list and animate the twinkles."""
+        W, PH = self.W, self.PH
+        H = PH // 2
+        rng = random.Random(1225)
+        static, lights, sparkles = [], [], []
+
+        def dot(x, y, c):
+            if 0 <= x < W and 0 <= y < PH:
+                static.append((y, x, c))
+
+        def leaf(cx, cy, ang, ln):
+            ca, sa = math.cos(ang), math.sin(ang)
+            for i in range(ln):
+                half = math.sin(math.pi * (i + 0.5) / ln) * ln / 3.4
+                for j in range(-int(half), int(half) + 1):
+                    dot(round(cx + ca * i - sa * j), round(cy + sa * i + ca * j),
+                        XMAS_PAL["l"] if j == 0 else XMAS_PAL["G"])
+
+        def holly(cx, cy, scale):
+            for deg, ln in ((150, 7), (30, 7), (95, 6), (122, 5), (58, 5)):
+                leaf(cx, cy, math.radians(deg), max(3, int(ln * scale)))
+            for ox, oy in ((-1, 1), (1, 1), (0, 2)):
+                dot(cx + ox, cy + oy, (214, 34, 46))
+            dot(cx - 1, cy, (255, 160, 160))
+
+        sag = max(4, min(10, int(PH * 0.08)))
+        if W >= 36 and PH >= 28:
+            # garland swags pinned along the top edge
+            k = max(2, W // 30)
+            span = W / k
+            greens = ((20, 84, 40), (30, 118, 56), (52, 156, 82))
+            swag = {}
+            for i in range(k):
+                a = i * span
+                for x in range(round(a), round(a + span)):
+                    y = 1 + int(sag * math.sin(math.pi * (x - a) / span))
+                    swag[x] = y
+                    for j in range(3):
+                        dot(x, y + j, greens[min(2, max(0, 2 - j + rng.choice((-1, 0, 0, 1))))])
+            for x in range(W):
+                if x % 11 == 5:  # red berries
+                    y = swag.get(x, 1)
+                    for ox, oy in ((0, 1), (1, 1)):
+                        dot(x + ox, y + oy, (214, 34, 46))
+                    dot(x, y, (255, 150, 150))
+            n = 0
+            for x in range(3, W - 2, 5):  # the string of lights hanging from it
+                lights.append((x, swag.get(x, 1) + 3, n % 5, rng.uniform(0, 6.28)))
+                n += 1
+            for i in range(1, k):  # holly and a red bow at every pin
+                ax = round(i * span)
+                holly(ax, 2, 1.0)
+                for dy, row in enumerate(XMAS_BOW):
+                    for dx, ch in enumerate(row):
+                        if ch != ".":
+                            dot(ax - 4 + dx, dy, XMAS_PAL[ch])
+            holly(2, 2, 1.5)
+            holly(W - 3, 2, 1.5)
+            if W >= 50:  # light strings down both sides
+                for sx, sgn in ((1, 1), (W - 2, -1)):
+                    yend = self._top(1, sx) - 3
+                    for y in range(sag + 4, yend):
+                        dot(sx, y, (22, 74, 40))
+                    for n, y in enumerate(range(sag + 7, yend - 2, 7)):
+                        lights.append((sx + (sgn if n % 2 else -sgn), y, (n + 2) % 5, rng.uniform(0, 6.28)))
+
+        # presents sitting in the snow
+        u = max(1.0, PH / 72)
+        gifts = [
+            ((200, 30, 45), (150, 18, 32), (255, 214, 90)),
+            ((30, 130, 70), (20, 96, 52), (220, 40, 50)),
+            ((60, 110, 220), (40, 80, 170), (240, 244, 255)),
+            ((130, 60, 180), (96, 40, 140), (255, 214, 90)),
+            ((246, 246, 250), (196, 202, 220), (210, 35, 50)),
+            ((240, 170, 40), (190, 125, 25), (30, 130, 70)),
+            ((220, 60, 140), (170, 40, 105), (240, 244, 255)),
+        ]
+        snow = (246, 250, 255)
+
+        def box(x, base, w, h, colors, style, finish=True):
+            body, shade, rib = colors
+            top = base - h + 1
+            lid = mix(body, (255, 255, 255), 0.2)
+            for yy in range(top, base + 1):
+                for xx in range(x, x + w):
+                    if yy <= top + 1:
+                        c = lid
+                    elif xx == x + w - 1 or yy == base:
+                        c = shade
+                    elif style == 1 and (xx - x) % 4 == 2:
+                        c = mix(body, (255, 255, 255), 0.28)
+                    elif style == 2 and (xx - x) % 4 == 1 and (yy - top) % 4 == 2:
+                        c = mix(body, (255, 255, 255), 0.55)
+                    else:
+                        c = body
+                    dot(xx, yy, c)
+            for yy in (top, top + 1):  # the lid sticks out a little
+                dot(x - 1, yy, lid)
+                dot(x + w, yy, shade)
+            rw = max(1, w // 5)
+            cx = x + (w - rw) // 2
+            for yy in range(top, base + 1):
+                for xx in range(cx, cx + rw):
+                    dot(xx, yy, rib)
+            if h >= 7 and w >= 8:
+                my = top + h // 2
+                for yy in range(my, my + max(1, h // 6)):
+                    for xx in range(x, x + w):
+                        dot(xx, yy, rib)
+            if finish:
+                for ox, oy in ((-3, -1), (-2, -1), (-3, -2), (-2, -2), (rw + 1, -1), (rw + 2, -1), (rw + 1, -2), (rw + 2, -2)):
+                    dot(cx + ox, top + oy, rib)
+                for xx in range(cx, cx + rw):
+                    dot(xx, top - 1, mix(rib, (0, 0, 0), 0.3))
+                for xx in range(x - 1, x + w + 1):
+                    if not cx - 3 <= xx < cx + rw + 3 and rng.random() < 0.75:
+                        dot(xx, top - 1, snow)
+                        if rng.random() < 0.3:
+                            dot(xx, top - 2, snow)
+            return top
+
+        first_gift = len(static)
+        x = rng.randint(1, 3)
+        while x < W - 6:
+            w = int(rng.choice((6, 8, 9, 10, 12)) * u)
+            h = min(max(4, int(w * rng.uniform(0.7, 1.0))), max(4, int(PH * 0.10)))
+            base = min(PH - 1, self._top(1, x + w // 2) + 2)
+            colors, style = rng.choice(gifts), rng.choice((0, 0, 1, 2))
+            if PH >= 96 and w >= 9 and rng.random() < 0.35:  # on tall windows, a small one stacked on top
+                top = box(x, base, w, h, colors, style, finish=False)
+                w2, h2 = w // 2 + 1, max(3, min(h // 2, int(PH * 0.06)))
+                box(x + (w - w2) // 2, top - 1, w2, h2, rng.choice(gifts), rng.choice((0, 2)))
+            else:
+                box(x, base, w, h, colors, style)
+            x += w + rng.randint(1, 6)
+
+        gift_top = [self._top(1, x) for x in range(W)]  # highest thing in each column: snow or a present
+        for y, x, _ in static[first_gift:]:
+            gift_top[x] = min(gift_top[x], y)
+
+        for _ in range(max(6, W // 6)):  # glitter on the snow
+            sx = rng.randrange(W)
+            sparkles.append((sx, self._top(1, sx) + rng.randint(0, 3), rng.uniform(0, 6.28)))
+
+        # flakes drawn as characters, in three layers for depth
+        ground = max(4, min(self._top(1, x) for x in range(0, W, 3)) // 2 - 1)
+        flakes = []
+        for _ in range(min(220, max(14, W * H // 55))):
+            r = rng.random()
+            if r < 0.5:
+                ch, col, sp, amp = ".", (150, 170, 205), rng.uniform(1.2, 2.4), 0.6
+            elif r < 0.8:
+                ch, col, sp, amp = "*", (205, 218, 240), rng.uniform(2.4, 4.2), 1.0
+            else:
+                ch, col, sp, amp = rng.choice("\u2744\u2745"), (246, 250, 255), rng.uniform(4.2, 6.5), 1.6
+            flakes.append((rng.uniform(0, W), rng.uniform(0, ground), sp, rng.uniform(0, 6.28), ch, col, amp))
+
+        self.xm = {"static": static, "lights": lights, "sparkles": sparkles, "flakes": flakes, "ground": ground,
+                   "gift_top": gift_top}
+
+    def _xmas_draw(self, fr, t, pulse):
+        """Garland, holly, presents, twinkling lights and glitter (all before the panels go on top)."""
+        if self.xm is None:
+            self._xmas_build()
+        W, PH, px = self.W, self.PH, fr.px
+        for y, x, c in self.xm["static"]:
+            px[y][x] = c
+        for x, y, ci, ph in self.xm["lights"]:
+            b = min(1.0, 0.35 + 0.65 * (0.5 + 0.5 * math.sin(t * 2.6 + ph)) + pulse * 0.4)
+            col = XMAS_LIGHTS[ci]
+            core = mix((24, 30, 28), col, b)
+            for dy in (0, 1):
+                if 0 <= x < W and 0 <= y + dy < PH:
+                    px[y + dy][x] = core
+            fr.put(x - 1, y, col, 0.22 * b)
+            fr.put(x + 1, y, col, 0.22 * b)
+            fr.put(x, y + 2, col, 0.18 * b)
+        for x, y, ph in self.xm["sparkles"]:
+            a = max(0.0, math.sin(t * 2.5 + ph)) ** 8
+            if a > 0.05:
+                fr.put(x, y, (255, 255, 255), a)
+
+    def snow_text(self, fr, t):
+        """Snowflakes as characters. They fall only through open sky: never over a panel, text,
+        or anything busy, so they can't smudge the dashboard."""
+        if self.xm is None:
+            self._xmas_build()
+        W, txt, px, rects = self.W, fr.txt, fr.px, fr.rects
+        g = self.xm["ground"]
+        for x0, y0, sp, ph, ch, col, amp in self.xm["flakes"]:
+            y = int((y0 + t * sp) % g)
+            x = int(x0 + amp * math.sin(t * 0.9 + ph)) % W
+            if (x, y) in txt:
+                continue
+            if any(rx <= x < rx + rw and ry <= y < ry + rh for rx, ry, rw, rh in rects):
+                continue
+            a, b = px[2 * y][x], px[2 * y + 1][x]
+            if abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 40:
+                continue
+            txt[(x, y)] = (ch, col, False)
+
+
+# --------------------------------------------------------------------------
+# Christmas mode: pixel art and Santa's rare flyby
+# --------------------------------------------------------------------------
+
+XMAS_LIGHTS = [(255, 64, 64), (255, 206, 74), (72, 224, 116), (96, 164, 255), (255, 128, 200)]
+XMAS_PAL = {
+    "a": (214, 176, 112), "b": (150, 96, 54), "B": (112, 70, 40), "d": (84, 52, 30),
+    "n": (255, 48, 48), "N": (96, 60, 36), "e": (28, 20, 20), "w": (246, 248, 255),
+    "r": (211, 31, 39), "R": (150, 20, 30), "s": (246, 202, 170), "y": (255, 207, 72),
+    "k": (126, 84, 50), "g": (44, 168, 86), "u": (74, 124, 232), "G": (24, 92, 44), "l": (60, 170, 92),
+}
+XMAS_REINDEER = [
+    ".........a.a..", ".........aaa.a", "..........aaa.", "...........a..", "..........bbb.",
+    "........bbbebn", ".......bbbbbb.", "......bbbbbb..", ".wbbbbbbbbbb..", "wwbbbbbbbbbbB.",
+    ".wbbbbbbbbbB..",
+]
+XMAS_LEGS = (["..d.d...d.d...", ".d...d.d...d.."], ["...d.d..d.d...", "...d.d..d.d..."])  # galloping, two frames
+XMAS_SLEIGH = [
+    "..........w..........", ".........rrr.........", "........rrrrr........", "........wwwww........",
+    "........ssses........", ".......wwwwwww.......", "..kkk..rrrrrrr.......", ".kkukk.rrrrrrrr......",
+    "kkgkkk.reeeyeeer...y.", "kkkkkkRRRRRRRRRRRRRyy", "yRRRRRRRRRRRRRRRRRRRy", ".yyRRRRRRRRRRRRRRyyy.",
+    "..yyyyyyyyyyyyyyyyy..", "yy.................y.",
+]
+XMAS_BOW = [".rr...rr.", "rRrr.rrRr", "rR.ryr.Rr", ".rrryrrr.", "..rr.rr..", ".rR...Rr."]
+
+
+def _build_train(frame):
+    """Santa, his sleigh and two reindeer, facing right: [(dx, dy, colour)] for one gallop frame."""
+    out = {}
+
+    def blit(sprite, ox, oy, swap=None):
+        for dy, row in enumerate(sprite):
+            for dx, ch in enumerate(row):
+                if ch != ".":
+                    out[(ox + dx, oy + dy)] = XMAS_PAL[(swap or {}).get(ch, ch)]
+
+    blit(XMAS_SLEIGH, 0, 0)
+    deer = XMAS_REINDEER + XMAS_LEGS[frame]
+    blit(deer, 28, 0, swap={"n": "N"})  # only the front reindeer has the red nose
+    blit(deer, 45, 0)
+    for x in list(range(20, 30)) + list(range(41, 47)):  # harness
+        out[(x, 9)] = XMAS_PAL["y"]
+    return [(dx, dy, c) for (dx, dy), c in out.items()]
+
+
+XMAS_TRAIN = [_build_train(0), _build_train(1)]
+XMAS_TRAIN_W, XMAS_TRAIN_H = 59, 14
+
+
+class Santa:
+    """Decides when Santa flies by. It's a random chance: after each flyby the next one comes at a
+    random time, never within a minute and about four minutes later on average, so it stays a
+    surprise. Times are animation seconds, so it doesn't care about the frame rate or window size."""
+
+    CROSS = 7.0  # seconds to fly across the screen
+    MIN_GAP = 60.0
+    MEAN_EXTRA = 180.0
+
+    def __init__(self, rng=None):
+        self.rng = rng or random.Random()
+        self.next_at = None
+        self.start = None
+        self.direction = 1
+        self.alt = 0.0
+        self.freeze = None  # show him at this point of the flight (screenshots and tests)
+
+    def reset(self, now=0.0, eager=False):
+        """Forget any flight in progress and plan a fresh first visit. Used when Christmas mode is
+        switched on, so Santa never appears the instant you press the key (unless eager: --santa-now)."""
+        self.start = None
+        self.next_at = now + 1.5 if eager else None
+
+    def _schedule(self, now, first=False):
+        gap = self.rng.uniform(30, 90) if first else self.MIN_GAP + self.rng.expovariate(1 / self.MEAN_EXTRA)
+        self.next_at = now + gap
+
+    def progress(self, now):
+        """How far across the screen he is (0 to 1), or None when he isn't flying."""
+        if self.freeze is not None:
+            return self.freeze
+        if self.next_at is None:
+            self._schedule(now, first=True)
+        if self.start is None and now >= self.next_at:
+            self.start, self.direction, self.alt = now, self.rng.choice((1, -1)), self.rng.random()
+        if self.start is None:
+            return None
+        p = (now - self.start) / self.CROSS
+        if p >= 1.0:
+            self.start = None
+            self._schedule(now)
+            return None
+        return max(0.0, p)
+
+
+def draw_santa(fr, santa, t):
+    """Santa's sleigh, drawn into the pixel layer after the panels so he passes in front of them
+    (text stays on top of him). He flies as high as the panels allow, and leaves a trail of dust."""
+    p = santa.progress(t)
+    W, PH = fr.W, fr.PH
+    if p is None or fr.H < 16 or W < 24:
+        return
+    d = santa.direction
+    lead = math.floor(-XMAS_TRAIN_W + p * (W + XMAS_TRAIN_W)) if d > 0 else math.floor(W - p * (W + XMAS_TRAIN_W))
+    top_panel = min((ry for _, ry, _, _ in fr.rects), default=fr.H) * 2
+    y0 = int(max(4, min(9 + santa.alt * PH * 0.06, top_panel - XMAS_TRAIN_H - 1)) + 1.5 * math.sin(t * 3.2))
+    px = fr.px
+    for dx, dy, c in XMAS_TRAIN[int(t * 8) % 2]:
+        x = lead + (dx if d > 0 else XMAS_TRAIN_W - 1 - dx)
+        y = y0 + dy
+        if 0 <= x < W and 0 <= y < PH:
+            px[y][x] = c
+    rear = lead if d > 0 else lead + XMAS_TRAIN_W - 1
+    for i in range(18):  # magic dust
+        a = (1 - i / 18) * (0.45 + 0.55 * abs(math.sin(t * 14 + i * 2.1)))
+        x = rear - d * (3 + i * 2)
+        y = y0 + 10 + int(2.5 * math.sin(t * 9 + i * 1.3))
+        fr.put(x, y, (255, 255, 255) if i % 2 else (255, 232, 150), a)
+        fr.put(x, y + 2, (255, 232, 150), a * 0.5)
+
+
+def xmas_border(fr, x0, y0, pw, ph, t, pulse):
+    """A panel's border as a string of twinkling Christmas lights on an evergreen wire."""
+    wire = (40, 132, 66)
+
+    def put(x, y, wire_ch, k):
+        if k % 3 == 1:
+            b = min(1.0, 0.45 + 0.55 * (0.5 + 0.5 * math.sin(t * 2.8 + k * 0.9)) + pulse * 0.5)
+            fr.text(x, y, "\u25cf", mix((50, 56, 54), XMAS_LIGHTS[(k // 3) % 5], b), True)
+        else:
+            fr.text(x, y, wire_ch, wire)
+
+    for i in range(pw):
+        corner = i in (0, pw - 1)
+        put(x0 + i, y0, ("\u256d" if i == 0 else "\u256e") if corner else "\u2500", 0 if corner else i)
+        put(x0 + i, y0 + ph - 1, ("\u2570" if i == 0 else "\u256f") if corner else "\u2500", 0 if corner else i + 7)
+    for j in range(1, ph - 1):
+        put(x0, y0 + j, "\u2502", j + 3)
+        put(x0 + pw - 1, y0 + j, "\u2502", j + 5)
 
 
 # --------------------------------------------------------------------------
@@ -1483,16 +1900,20 @@ OPTIONS = (
 )
 
 
-def draw_glass(fr, lines, x0, y0, pw, ph, border):
+def draw_glass(fr, lines, x0, y0, pw, ph, border, xmas=None):
     W, H = fr.W, fr.H
+    fr.rects.append((x0, y0, pw, ph))
     for r in range(2 * y0, 2 * (y0 + ph)):
         for x in range(max(0, x0), min(W, x0 + pw)):
             fr.put(x, r, (8, 10, 20), 0.55)
-    fr.text(x0, y0, "\u256d" + "\u2500" * (pw - 2) + "\u256e", border)
-    fr.text(x0, y0 + ph - 1, "\u2570" + "\u2500" * (pw - 2) + "\u256f", border)
-    for y in range(y0 + 1, y0 + ph - 1):
-        fr.text(x0, y, "\u2502", border)
-        fr.text(x0 + pw - 1, y, "\u2502", border)
+    if xmas:
+        xmas_border(fr, x0, y0, pw, ph, *xmas)
+    else:
+        fr.text(x0, y0, "\u256d" + "\u2500" * (pw - 2) + "\u256e", border)
+        fr.text(x0, y0 + ph - 1, "\u2570" + "\u2500" * (pw - 2) + "\u256f", border)
+        for y in range(y0 + 1, y0 + ph - 1):
+            fr.text(x0, y, "\u2502", border)
+            fr.text(x0 + pw - 1, y, "\u2502", border)
     for i, segs in enumerate(lines[: ph - 2]):
         x = x0 + (pw - width_of(segs)) // 2
         for text, fg, bold in segs:
@@ -1559,7 +1980,7 @@ def draw_panels(fr, st, now, cfg, pulse, t=0.0):
     sizes = [(min(W, max(width_of(l) for l in p) + 8), min(H, len(p) + 2)) for p in panels]
     x = (W - (sum(w for w, _ in sizes) + 2 * (len(sizes) - 1))) // 2
     for p, (pw, ph) in zip(panels, sizes):
-        draw_glass(fr, p, x, (H - ph) // 2, pw, ph, border)
+        draw_glass(fr, p, x, (H - ph) // 2, pw, ph, border, (t, pulse) if cfg.get("christmas") else None)
         x += pw + 2
 
     hidden = [PANEL_LABELS[k] for k in enabled if k not in shown]
@@ -1577,6 +1998,10 @@ def compose(W, H, st, cfg, scene, t):
     if st.weather:
         _, kind, inten = WMO.get(st.weather["current"]["weather_code"], ("", "cloud", 0))
 
+    xmas = bool(cfg.get("christmas"))
+    if xmas:  # snow beats every weather effect; the real weather still shows in the panel
+        kind, inten = "xmas", 1.1
+
     bars, pulse = None, 0.0
     if cfg.get("viz") and (st.audio.demo or st.audio.proc is not None):
         bars = st.audio.bars(min(64, max(8, W // 3)))
@@ -1584,9 +2009,12 @@ def compose(W, H, st, cfg, scene, t):
         pulse = sum(bars[:k]) / k
 
     fr = Frame(W, H)
-    fr.halloween = bool(cfg.get("halloween"))
-    scene.draw(fr, hour, kind, inten, t, bars, pulse, fr.halloween)
+    fr.halloween = bool(cfg.get("halloween")) and not xmas  # Christmas wins if both are asked for
+    scene.draw(fr, hour, kind, inten, t, bars, pulse, fr.halloween, xmas)
     draw_panels(fr, st, now, cfg, pulse, t)
+    if xmas:
+        draw_santa(fr, st.santa, t)
+        scene.snow_text(fr, t)
     if cfg.get("viz") and st.audio.err and not st.audio.demo:
         msg = "\u266a " + st.audio.err
         fr.text((W - len(msg)) // 2, H - 1, msg, DIM)
@@ -1601,7 +2029,7 @@ CONF = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "daw
 
 
 def load_config():
-    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "procs": False, "media": False, "lyrics": True, "halloween": False, "sort": "cpu"}
+    cfg = {"city": None, "units": "c", "h12": False, "viz": True, "procs": False, "media": False, "lyrics": True, "halloween": False, "christmas": False, "sort": "cpu"}
     try:
         saved = json.loads(CONF.read_text())
         panel = saved.pop("panel", None)  # dawn 1.2 had a single side panel
@@ -1613,8 +2041,9 @@ def load_config():
     return cfg
 
 
-def run(cfg):
+def run(cfg, santa_now=False):
     st = State()
+    st.santa.reset(0.0, santa_now)
     threading.Thread(target=worker, args=(st, cfg["city"]), daemon=True).start()
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -1658,6 +2087,9 @@ def run(cfg):
         out.flush()
         size, scene, prev = None, None, None
         t0 = time.time()
+        gc.collect()
+        gc.freeze()  # everything built so far is long-lived: stop re-scanning it
+        gc.set_threshold(50_000, 20, 20)  # each frame makes thousands of short-lived tuples
         while True:
             frame_start = time.time()
             sz = shutil.get_terminal_size((80, 24))
@@ -1665,10 +2097,10 @@ def run(cfg):
             if (W, H) != size:
                 size, scene, prev = (W, H), Scene(W, H), None
                 out.write("\x1b[0m\x1b[2J")
-            rows = compose(W, H, st, cfg, scene, time.time() - t0).rows()
-            out.write("".join(r for i, r in enumerate(rows) if prev is None or prev[i] != r) + "\x1b[0m")
+            grid = compose(W, H, st, cfg, scene, time.time() - t0).grid()
+            out.write(paint(grid, prev) + "\x1b[0m")
             out.flush()
-            prev = rows
+            prev = grid
             wait = max(0.0, frame_start + FRAME_TIME - time.time())  # keep a steady pace
             if select.select([fd], [], [], wait)[0]:
                 data = os.read(fd, 64)
@@ -1687,6 +2119,10 @@ def run(cfg):
                 elif data == b"l":
                     cfg["lyrics"] = not cfg["lyrics"]
                     apply()
+                elif data == b"c":
+                    cfg["christmas"] = not cfg["christmas"]
+                    if cfg["christmas"]:
+                        st.santa.reset(time.time() - t0, santa_now)
                 elif data == b"v":
                     cfg["viz"] = not cfg["viz"]
                     apply()
@@ -1705,7 +2141,7 @@ def run(cfg):
         out.flush()
 
 
-def once(cfg):
+def once(cfg, santa_now=False):
     st = State()
     try:
         lat, lon, st.place = locate(cfg["city"])
@@ -1713,6 +2149,8 @@ def once(cfg):
         st.offset = st.weather.get("utc_offset_seconds")
     except Exception as e:
         st.error = str(e)
+    if santa_now:
+        st.santa.freeze = 0.42
     if cfg["viz"]:
         st.audio.demo = True  # no sound in a still frame, so show a sample spectrum
     if cfg["procs"]:
@@ -1742,7 +2180,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog="dawn",
         description="A beautiful weather, time & date dashboard for your terminal.",
-        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 l lyrics \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
+        epilog="Keys: q quit \u00b7 u switch \u00b0C/\u00b0F \u00b7 t 12h/24h \u00b7 p processes \u00b7 m now playing \u00b7 l lyrics \u00b7 c christmas \u00b7 v visualiser \u00b7 s sort \u00b7 r refresh",
     )
     p.add_argument("-c", "--city", help='show this place instead of auto-detecting, e.g. --city "Tokyo"')
     p.add_argument("-u", "--units", choices=["c", "f"], help="temperature units: c (Celsius) or f (Fahrenheit)")
@@ -1752,6 +2190,8 @@ def main(argv=None):
     p.add_argument("--media", action=argparse.BooleanOptionalAction, help="show the Now Playing panel (left)")
     p.add_argument("--viz", action=argparse.BooleanOptionalAction, help="show the audio visualiser")
     p.add_argument("--lyrics", action=argparse.BooleanOptionalAction, help="show synced lyrics in Now Playing (looked up on lrclib.net)")
+    p.add_argument("--christmas", action=argparse.BooleanOptionalAction, help="Christmas mode: snow, lights, presents and a rare Santa flyby")
+    p.add_argument("--santa-now", action="store_true", help="in Christmas mode, send Santa by a couple of seconds after starting")
     p.add_argument("--halloween", action=argparse.BooleanOptionalAction, help="start in Halloween mode (boo?)")
     p.add_argument("--save", action="store_true", help="remember these options for next time")
     p.add_argument("--once", action="store_true", help="print one frame and exit (handy for screenshots)")
@@ -1759,7 +2199,7 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     cfg = load_config()
-    for k in ("city", "units", "h12", "procs", "media", "lyrics", "viz", "halloween"):
+    for k in ("city", "units", "h12", "procs", "media", "lyrics", "viz", "halloween", "christmas"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
 
@@ -1774,12 +2214,12 @@ def main(argv=None):
         pass
 
     if a.once:
-        once(cfg)
+        once(cfg, a.santa_now)
         return 0
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("dawn needs to run in a terminal window.", file=sys.stderr)
         return 1
-    run(cfg)
+    run(cfg, a.santa_now)
     return 0
 
 
