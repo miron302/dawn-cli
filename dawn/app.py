@@ -1663,13 +1663,20 @@ def build_lines(st, now, W, cfg, big, days, footer, icon):
                 r3.append(seg(f"{fmt_temp(d['temperature_2m_max'][i], units)} {fmt_temp(d['temperature_2m_min'][i], units)}".center(11), WHITE))
             L.extend([r1, r2, r3])
 
-    if footer:
+    if footer:  # footer is 2 (all the hints, with the Christmas key), 1 (the original hints) or 0 (none)
         L.append([])
-        if inner >= 40:
-            L.append([seg("q quit \u00b7 u units \u00b7 t clock \u00b7 r refresh", (110, 120, 145))])
-            L.append([seg("p processes \u00b7 m now playing \u00b7 v visualiser", (110, 120, 145))])
-        else:
-            L.append([seg("q quit \u00b7 p procs \u00b7 m music", (110, 120, 145))])
+        hint = (110, 120, 145)
+        if inner >= 40 and footer == 2:  # room for three short lines
+            L.append([seg("q quit \u00b7 u units \u00b7 t clock", hint)])
+            L.append([seg("p processes \u00b7 m now playing", hint)])
+            L.append([seg("v visualiser \u00b7 r refresh \u00b7 c christmas", hint)])
+        elif inner >= 40:  # the original two lines, for when a third won't fit
+            L.append([seg("q quit \u00b7 u units \u00b7 t clock \u00b7 r refresh", hint)])
+            L.append([seg("p processes \u00b7 m now playing \u00b7 v visualiser", hint)])
+        elif footer == 2:  # a narrow window: one short line, with the Christmas key
+            L.append([seg("q quit \u00b7 p procs \u00b7 m music \u00b7 c xmas", hint)])
+        else:  # narrower still, or no room: as short as it always was
+            L.append([seg("q quit \u00b7 p procs \u00b7 m music", hint)])
     L.append([])
     return L
 
@@ -1890,13 +1897,17 @@ def build_media_lines(mm, H, t, lm=None):
 
 # ---- glass panels
 
-OPTIONS = (
-    (True, 5, True, True),
-    (True, 0, True, True),
-    (True, 0, False, True),
-    (True, 0, True, False),
-    (False, 0, True, False),
-    (False, 0, False, False),
+OPTIONS = (  # (big clock, forecast days, footer, icon); every footer layout tries all the hints first, then the original ones
+    (True, 5, 2, True),
+    (True, 5, 1, True),
+    (True, 0, 2, True),
+    (True, 0, 1, True),
+    (True, 0, 0, True),
+    (True, 0, 2, False),
+    (True, 0, 1, False),
+    (False, 0, 2, False),
+    (False, 0, 1, False),
+    (False, 0, 0, False),
 )
 
 
