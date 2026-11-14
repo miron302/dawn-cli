@@ -1,6 +1,6 @@
 # Maintainer: miron302
 pkgname=dawn-cli
-pkgver=1.3.0
+pkgver=1.7.0
 pkgrel=1
 pkgdesc="Terminal dashboard with weather, clock, audio visualiser, processes and now playing"
 arch=('any')

@@ -137,7 +137,7 @@ If the bars stay flat while music is playing, make sure the helper from "Optiona
 
 ## The process viewer
 
-Press `p` to open a frosted-glass panel on the right of the clock. It shows CPU and memory use, a short CPU history graph, load and uptime, and the busiest programs with their CPU and memory use. The percentages work like htop's, so a program using two cores can show 200%. It's a quick glance, not a replacement for htop (you can't kill processes from here).
+Press `p` to open a frosted-glass panel on the right of the clock. It shows CPU and memory use, a short CPU history graph, load and uptime, and the busiest programs with their CPU and memory use. Every CPU percentage is a share of the whole machine: the process list and the big CPU gauge above it use the same scale, so the busiest programs add up to roughly the total shown there. That makes a busy program easy to compare with overall CPU use. It's a quick glance, not a replacement for htop (you can't kill processes from here).
 
 ## Now Playing
 

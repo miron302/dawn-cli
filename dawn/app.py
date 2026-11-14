@@ -489,6 +489,7 @@ class SysMon:
         self.stop = threading.Event()
         self.hz = os.sysconf("SC_CLK_TCK")
         self.page = os.sysconf("SC_PAGE_SIZE")
+        self.ncores = os.cpu_count() or 1
         self.reset()
         self.hist = deque(maxlen=40)
         self.cpu, self.mem, self.procs, self.load, self.uptime = 0.0, (0, 1), [], (0, 0, 0), 0
@@ -534,8 +535,10 @@ class SysMon:
             cur[pid] = ticks
             cpu = 0.0
             if elapsed and pid in self.prev_proc:
-                cpu = 100.0 * (ticks - self.prev_proc[pid]) / (self.hz * elapsed)
-            rows.append((name, max(0.0, cpu), rss, pid))
+                # Share of the whole machine, same scale as the big CPU gauge,
+                # so a busy process can never look bigger than total CPU use.
+                cpu = 100.0 * (ticks - self.prev_proc[pid]) / (self.hz * elapsed * self.ncores)
+            rows.append((name, min(100.0, max(0.0, cpu)), rss, pid))
         self.prev_proc, self.prev_t = cur, now
         self.procs = rows
         try:
@@ -1738,37 +1741,42 @@ def shrink(lines, H):
 
 def build_proc_lines(sm, H, cfg):
     mem_used, mem_total = sm.mem
-    n = min(8, H - 16)
+    mem_pct = 100 * mem_used / max(1, mem_total)
+    n = min(8, H - 19)
+    by_mem = cfg.get("sort") == "mem"
+    ncores = getattr(sm, "ncores", 1)
+    bar_w = 20
+
     L = [[]] + panel_title("PROCESSES")
-    L.append([seg(f"load {sm.load[0]:.2f} \u00b7 up {fmt_up(sm.uptime)}".center(TW), DIM)])
+    summary = f"load {sm.load[0]:.2f} \u00b7 up {fmt_up(sm.uptime)} \u00b7 {len(sm.procs)} procs"
+    L.append([seg(clip(summary, TW).center(TW), HINT)])
     L.append([])
-    L.append(gauge("CPU", sm.cpu / 100, f"{sm.cpu:.0f}%"))
-    if n >= 2:
-        hist = list(sm.hist)[-(TW - 4):]
-        spark = [seg("    ", DIM)] + [seg(" " * (TW - 4 - len(hist)))]
+    L.append(gauge("CPU", sm.cpu / 100, f"{sm.cpu:.0f}%", width=bar_w))
+    if n >= 2 and sm.hist:
+        hist = list(sm.hist)[-bar_w:]
+        spark = [seg("    ", DIM), seg(" " * (bar_w - len(hist)))]
         spark += [seg("\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"[min(7, int(v / 12.5))], ramp(v / 100)) for v in hist]
         L.append(spark)
-    L.append(gauge("MEM", mem_used / max(1, mem_total), f"{100 * mem_used / max(1, mem_total):.0f}%"))
+    L.append(gauge("MEM", mem_used / max(1, mem_total), f"{mem_pct:.0f}%", width=bar_w))
     if n >= 2:
-        L.append([seg(f"    {human(mem_used)} of {human(mem_total)} used".ljust(TW), DIM)])
+        L.append([seg(f"    {human(mem_used)} of {human(mem_total)} used", DIM)])
         L.append([])
-        L.append([seg(f"{'PROCESS':<14} {'':<8} {'CPU%':>5} {'MEM':>7}", DIM)])
-        by_mem = cfg.get("sort") == "mem"
+        L.append([seg("    " + pad("PROCESS", 17) + pad("CPU%", 6, ">") + " " + pad("MEM", 7, ">"), HINT)])
+        L.append([seg("\u2500" * 35, DARK)])
         rows = sorted(sm.procs, key=(lambda r: (r[2], r[1])) if by_mem else (lambda r: (r[1], r[2])), reverse=True)
-        for name, cpu, rss, _pid in rows[:n]:
-            f = min(1.0, cpu / 100)
-            fill = int(round(f * 8))
+        for i, (name, cpu, rss, _pid) in enumerate(rows[:n], 1):
             L.append([
-                seg(pad(clip(name, 14), 14) + " ", WHITE),
-                seg("\u2588" * fill, ramp(f)),
-                seg("\u00b7" * (8 - fill), DARK),
-                seg(f" {cpu:5.1f}", ramp(f) if cpu >= 0.1 else DIM),
-                seg(f" {human(rss):>7}", DIM),
+                seg(f"{i:>2}  ", DIM),
+                seg(pad(clip(name, 17), 17), WHITE, i == 1),
+                seg(f"{cpu:5.1f}%", ramp(cpu / 100) if cpu >= 0.1 else DIM),
+                seg(" "),
+                seg(f"{human(rss):>7}", DIM),
             ])
         for _ in range(n - len(rows[:n])):
             L.append([seg(" " * TW)])
         L.append([])
-        L.append([seg(f"sorted by {'memory' if by_mem else 'cpu'} \u00b7 s to change".center(TW), HINT)])
+        L.append([seg(clip(f"    CPU% = share of all {ncores} cores", TW), HINT)])
+        L.append([seg(clip(f"    sorted by {'memory' if by_mem else 'cpu'} \u00b7 s to change", TW), HINT)])
     L.append([])
     return L
 
