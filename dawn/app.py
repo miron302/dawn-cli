@@ -380,19 +380,60 @@ class Audio:
             self.np = None
             self.fft = make_fft(self.N)
 
-    def start(self):
-        if self.proc is not None:
-            return
+    def _command(self):
+        """The command that streams what the computer is playing as raw 16-bit mono audio, or None (and self.err)."""
+        if IS_MAC:
+            return self._command_mac()
         exe = shutil.which("parec")
         if not exe:
             self.err = "install libpulse to enable the audio visualiser"
+            return None
+        return [exe, "-d", "@DEFAULT_MONITOR@", "--format=s16le", f"--rate={self.RATE}",
+                "--channels=1", "--latency-msec=20"]
+
+    def _command_mac(self):
+        # macOS can't hand out the sound it is playing, so dawn reads a loopback device
+        # (BlackHole, Loopback or Soundflower) through ffmpeg. The visualiser is optional on macOS; see the README.
+        exe = shutil.which("ffmpeg")
+        if not exe:
+            self.err = "visualiser needs ffmpeg and an audio loopback device (see README)"
+            return None
+        try:
+            listing = subprocess.run([exe, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                                     capture_output=True, text=True, timeout=8, errors="replace").stderr
+        except (OSError, subprocess.SubprocessError):
+            self.err = "couldn't list audio devices with ffmpeg"
+            return None
+        devices, in_audio = [], False
+        for line in listing.splitlines():
+            if "audio devices" in line.lower():
+                in_audio = True
+            elif in_audio:
+                m = re.search(r"\]\s*\[(\d+)\]\s*(.+?)\s*$", line)
+                if m:
+                    devices.append((m.group(1), m.group(2)))
+        want = os.environ.get("DAWN_AUDIO_DEVICE", "").strip().lower()
+        pick = None
+        for idx, name in devices:
+            low = name.lower()
+            if (want and (want == idx or want in low)) or (not want and any(k in low for k in ("blackhole", "loopback", "soundflower"))):
+                pick = idx
+                break
+        if pick is None:
+            self.err = "visualiser needs an audio loopback device (see README)"
+            return None
+        return [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "nobuffer", "-f", "avfoundation",
+                "-i", f":{pick}", "-ac", "1", "-ar", str(self.RATE), "-f", "s16le", "-"]
+
+    def start(self):
+        if self.proc is not None:
+            return
+        cmd = self._command()
+        if not cmd:
             return
         try:
-            self.proc = subprocess.Popen(
-                [exe, "-d", "@DEFAULT_MONITOR@", "--format=s16le", f"--rate={self.RATE}",
-                 "--channels=1", "--latency-msec=20"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
-            )
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                         stdin=subprocess.DEVNULL, bufsize=0)
         except OSError as e:
             self.err = f"couldn't start audio capture: {e}"
             return
@@ -420,7 +461,8 @@ class Audio:
             pass
         if self.proc is proc:  # it died on its own
             self.proc = None
-            self.err = "audio capture stopped (is PipeWire or PulseAudio running?)"
+            self.err = ("audio capture stopped (does your terminal have microphone access?)" if IS_MAC
+                        else "audio capture stopped (is PipeWire or PulseAudio running?)")
 
     def _mags(self, data):
         N = self.N
@@ -479,25 +521,111 @@ class Audio:
 
 
 # --------------------------------------------------------------------------
-# Process viewer (reads /proc directly, like a tiny htop)
+# Process viewer (Linux: reads /proc directly. macOS: asks ps, vm_stat and sysctl)
 # --------------------------------------------------------------------------
+
+IS_MAC = sys.platform == "darwin"
+
+
+def parse_cputime(s):
+    """'1-02:03:04', '12:34:56', '3:21.45' or '0:00.01' -> seconds (macOS ps 'time' column)."""
+    days = 0
+    if "-" in s:
+        d, _, s = s.partition("-")
+        days = int(d)
+    secs = 0.0
+    for part in s.strip().split(":"):
+        secs = secs * 60 + float(part)
+    return days * 86400 + secs
+
+
+def parse_ps_darwin(text):
+    """Parse `ps -A -c -o pid=,ppid=,time=,rss=,comm=` into (pid, ppid, cpu_seconds, rss_bytes, name) rows."""
+    rows = []
+    for line in text.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        try:
+            name = re.sub(r"\s*\([^)]*\)$", "", parts[4].strip()) or parts[4].strip()  # "Chrome Helper (GPU)" -> "Chrome Helper"
+            rows.append((int(parts[0]), int(parts[1]), parse_cputime(parts[2]), int(parts[3]) * 1024, name))
+        except ValueError:
+            continue
+    return rows
+
+
+def parse_vm_stat(text):
+    """Memory in use on macOS (what Activity Monitor calls app + wired + compressed), in bytes."""
+    m = re.search(r"page size of (\d+) bytes", text)
+    psz = int(m.group(1)) if m else 4096
+    pages = {}
+    for line in text.splitlines():
+        k, _, v = line.partition(":")
+        v = v.strip().rstrip(".")
+        if v.isdigit():
+            pages[k.strip()] = int(v)
+    used = pages.get("Pages active", 0) + pages.get("Pages wired down", 0) + pages.get("Pages occupied by compressor", 0)
+    return used * psz
+
+
+def darwin_cpu_ticks():
+    """(busy, total) CPU ticks since boot from the kernel, or None if it can't be read."""
+    try:
+        import ctypes
+
+        lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        lib.mach_host_self.restype = ctypes.c_uint
+        lib.host_statistics.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+        buf, count = (ctypes.c_uint * 4)(), ctypes.c_uint(4)
+        if lib.host_statistics(lib.mach_host_self(), 3, buf, ctypes.byref(count)) != 0:  # 3 = HOST_CPU_LOAD_INFO
+            return None
+        user, system, idle, nice = buf
+        return user + system + nice, user + system + nice + idle
+    except Exception:
+        return None
+
+
+def run_text(cmd, timeout=5):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, errors="replace").stdout
 
 
 class SysMon:
     def __init__(self):
         self.enabled = threading.Event()
         self.stop = threading.Event()
-        self.hz = os.sysconf("SC_CLK_TCK")
-        self.page = os.sysconf("SC_PAGE_SIZE")
         self.ncores = os.cpu_count() or 1
+        if not IS_MAC:
+            self.hz = os.sysconf("SC_CLK_TCK")
+            self.page = os.sysconf("SC_PAGE_SIZE")
+        self.mem_total, self.boot = None, None
         self.reset()
         self.hist = deque(maxlen=40)
-        self.cpu, self.mem, self.procs, self.load, self.uptime = 0.0, (0, 1), [], (0, 0, 0), 0
+        self.cpu, self.mem, self.procs, self.load, self.uptime, self.nproc = 0.0, (0, 1), [], (0, 0, 0), 0, 0
 
     def reset(self):
         self.prev_cpu, self.prev_proc, self.prev_t = None, {}, None
 
+    def _finish(self, raw):
+        """Group processes that share a name (all the Chrome helpers become one row)."""
+        groups = {}
+        for name, cpu, rss, _pid in raw:
+            g = groups.get(name)
+            if g is None:
+                groups[name] = [name, cpu, rss, 1]
+            else:
+                g[1] += cpu
+                g[2] += rss
+                g[3] += 1
+        self.procs = [(n, min(100.0, c), r, k) for n, c, r, k in groups.values()]
+        self.nproc = len(raw)
+
     def update(self):
+        if IS_MAC:
+            self._update_darwin()
+        else:
+            self._update_linux()
+
+    def _update_linux(self):
         now = time.monotonic()
         with open("/proc/stat") as f:
             v = [int(x) for x in f.readline().split()[1:9]]
@@ -527,6 +655,7 @@ class SysMon:
                 i = s.rfind(")")
                 name = "".join(c if c.isprintable() else "?" for c in s[s.find("(") + 1: i])
                 rest = s[i + 2:].split()
+                ppid = int(rest[1])
                 ticks = int(rest[11]) + int(rest[12])
                 rss = int(rest[21]) * self.page
             except (OSError, ValueError, IndexError):
@@ -538,13 +667,56 @@ class SysMon:
                 # Share of the whole machine, same scale as the big CPU gauge,
                 # so a busy process can never look bigger than total CPU use.
                 cpu = 100.0 * (ticks - self.prev_proc[pid]) / (self.hz * elapsed * self.ncores)
+            if pid == 2 or ppid == 2:  # kernel threads are noise, not programs
+                continue
             rows.append((name, min(100.0, max(0.0, cpu)), rss, pid))
         self.prev_proc, self.prev_t = cur, now
-        self.procs = rows
+        self._finish(rows)
         try:
             self.load = os.getloadavg()
             with open("/proc/uptime") as f:
                 self.uptime = float(f.read().split()[0])
+        except (OSError, ValueError):
+            pass
+
+    def _update_darwin(self):
+        now = time.monotonic()
+        rows = parse_ps_darwin(run_text(["ps", "-A", "-c", "-o", "pid=,ppid=,time=,rss=,comm="]))
+        elapsed = now - self.prev_t if self.prev_t else None
+        cur, out = {}, []
+        for pid, _ppid, secs, rss, name in rows:
+            cur[pid] = secs
+            cpu = 0.0
+            if elapsed and pid in self.prev_proc:
+                cpu = 100.0 * (secs - self.prev_proc[pid]) / (elapsed * self.ncores)
+            out.append((name, max(0.0, cpu), rss, pid))
+        ticks = darwin_cpu_ticks()
+        if ticks and self.prev_cpu and ticks[1] > self.prev_cpu[1]:
+            self.cpu = 100.0 * (ticks[0] - self.prev_cpu[0]) / (ticks[1] - self.prev_cpu[1])
+            self.hist.append(self.cpu)
+        elif elapsed and not ticks:  # no kernel counters: add up what the processes used
+            self.cpu = min(100.0, sum(r[1] for r in out))
+            self.hist.append(self.cpu)
+        self.prev_cpu = (ticks if ticks else (0, 0))
+        self.prev_proc, self.prev_t = cur, now
+        self._finish(out)
+
+        if self.mem_total is None:
+            try:
+                self.mem_total = int(run_text(["sysctl", "-n", "hw.memsize"]).strip())
+            except ValueError:
+                self.mem_total = 1
+        try:
+            self.mem = (min(self.mem_total, parse_vm_stat(run_text(["vm_stat"]))), self.mem_total)
+        except Exception:
+            pass
+        try:
+            self.load = os.getloadavg()
+            if self.boot is None:
+                m = re.search(r"sec = (\d+)", run_text(["sysctl", "-n", "kern.boottime"]))
+                self.boot = int(m.group(1)) if m else None
+            if self.boot:
+                self.uptime = max(0.0, time.time() - self.boot)
         except (OSError, ValueError):
             pass
 
@@ -561,12 +733,12 @@ class SysMon:
                 self.stop.wait(0.2)
 
 
-
 # --------------------------------------------------------------------------
 # Now Playing (asks playerctl what any MPRIS media player is doing)
 # --------------------------------------------------------------------------
 
 _SEP = "\x1f"
+MAC_PLAYERS = (("Spotify", True), ("Music", False))  # (app, reports its length in milliseconds)
 MEDIA_FMT = _SEP.join("{{%s}}" % k for k in ("playerName", "status", "artist", "title", "album", "position", "mpris:length"))
 
 APP_NAMES = {
@@ -579,6 +751,7 @@ APP_NAMES = {
     "lollypop": "Lollypop", "quodlibet": "Quod Libet", "deadbeef": "DeaDBeeF", "kdeconnect": "KDE Connect",
     "tidal-hifi": "TIDAL", "youtube-music": "YouTube Music", "yesplaymusic": "YesPlayMusic",
     "amberol": "Amberol", "gnome-music": "GNOME Music", "totem": "Videos", "haruna": "Haruna",
+    "music": "Apple Music", "macos": "macOS media",
 }
 
 
@@ -600,16 +773,24 @@ class MediaMon:
         self.ready = False  # have we asked at least once?
 
     def poll(self):
+        if IS_MAC:
+            found = self._poll_mac()
+        else:
+            found = self._poll_playerctl()
+        if found is not None:
+            self.players, self.ready = found, True
+
+    def _poll_playerctl(self):
         exe = shutil.which("playerctl")
         self.missing = exe is None
         if exe is None:
             self.players, self.ready = [], True
-            return
+            return None
         try:
             r = subprocess.run([exe, "-a", "metadata", "--format", MEDIA_FMT],
                                capture_output=True, text=True, timeout=3)
         except (OSError, subprocess.SubprocessError):
-            return
+            return None
         now, found = time.monotonic(), []
         for line in r.stdout.split("\n"):
             parts = line.split(_SEP)
@@ -628,7 +809,57 @@ class MediaMon:
                 continue  # an idle player with nothing loaded
             found.append({"name": name, "status": status, "artist": artist, "title": title,
                           "album": album, "pos": pos, "len": length, "at": now})
-        self.players, self.ready = found, True
+        return found
+
+    def _poll_mac(self):
+        """Apple Music and Spotify through AppleScript (only if already running, so we never launch them),
+        then anything else macOS reports through nowplaying-cli, if that is installed."""
+        self.missing = False
+        now, found = time.monotonic(), []
+        for app, ms in MAC_PLAYERS:
+            if subprocess.run(["pgrep", "-x", app], capture_output=True).returncode != 0:
+                continue  # not running; asking would open it
+            script = (f'tell application "{app}"\nif player state is not stopped then\n'
+                      'set sep to (ASCII character 31)\n'
+                      'return (player state as text) & sep & (artist of current track) & sep & (name of current track) & sep'
+                      ' & (album of current track) & sep & (player position as text) & sep & (duration of current track as text)\n'
+                      'end if\nend tell')
+            try:
+                out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                continue
+            parts = out.split(_SEP)
+            if len(parts) != 6:
+                continue
+            state, artist, title, album = parts[0].strip().lower(), *(clean_text(x) for x in parts[1:4])
+            try:
+                pos = int(float(parts[4].replace(",", ".")) * 1e6)
+            except ValueError:
+                pos = None
+            try:
+                length = int(float(parts[5].replace(",", ".")) * (1000 if ms else 1e6)) or None
+            except ValueError:
+                length = None
+            found.append({"name": app, "status": "Playing" if state == "playing" else "Paused", "artist": artist,
+                          "title": title, "album": album, "pos": pos, "len": length, "at": now})
+        if not found and shutil.which("nowplaying-cli"):
+            try:
+                out = subprocess.run(["nowplaying-cli", "get", "title", "artist", "album", "duration", "elapsedTime", "playbackRate"],
+                                     capture_output=True, text=True, timeout=3).stdout.split("\n")
+                vals = [None if v.strip() in ("", "(null)", "null") else v.strip() for v in out[:6]]
+                if len(vals) == 6 and (vals[0] or vals[1]):
+                    def num(v):
+                        try:
+                            return int(float(v) * 1e6)
+                        except (TypeError, ValueError):
+                            return None
+                    rate = float(vals[5]) if vals[5] and vals[5].replace(".", "", 1).isdigit() else 0.0
+                    found.append({"name": "macos", "status": "Playing" if rate > 0 else "Paused", "artist": clean_text(vals[1] or ""),
+                                  "title": clean_text(vals[0] or ""), "album": clean_text(vals[2] or ""),
+                                  "pos": num(vals[4]), "len": num(vals[3]) or None, "at": now})
+            except (OSError, subprocess.SubprocessError):
+                pass
+        return found
 
     def current(self):
         """The player to show (one that's playing wins) and how many others there are."""
@@ -1686,7 +1917,8 @@ def build_lines(st, now, W, cfg, big, days, footer, icon):
 
 # ---- process viewer panel
 
-TW = 37  # inner width of the process panel
+TW = 37  # inner width of the side panels
+NAME_W, CPU_W, MEM_W = 16, 8, 9  # process table columns (4 + 16 + 8 + 9 = TW)
 
 
 def ramp(f):
@@ -1696,13 +1928,13 @@ def ramp(f):
     return mix((255, 220, 110), (255, 110, 100), (f - 0.5) * 2)
 
 
-def gauge(label, frac, text, width=27):
-    n = int(round(max(0.0, min(1.0, frac)) * width))
-    segs = [seg(f"{label:<4}", DIM)]
-    for i in range(width):
-        segs.append(seg("\u2588", ramp(i / (width - 1))) if i < n else seg("\u2591", (64, 72, 96)))
-    segs.append(seg(f" {text:>5}", WHITE, True))
-    return segs
+def gauge(label, frac, text, width=28):
+    """A slim bar in one colour that shifts green -> yellow -> red as it fills."""
+    frac = max(0.0, min(1.0, frac))
+    n = int(round(frac * width))
+    col = ramp(frac)
+    return [seg(f"{label:<4}", DIM, True), seg("\u2501" * n, col), seg("\u2500" * (width - n), DARK),
+            seg(f" {text:>4}", WHITE, True)]
 
 
 def human(b):
@@ -1739,44 +1971,59 @@ def shrink(lines, H):
     return lines
 
 
+def fill(segs):
+    """Pad a line to the full panel width so it stays left-aligned with the rest (panels centre short lines)."""
+    return segs + [seg(" " * max(0, TW - width_of(segs)))]
+
+
 def build_proc_lines(sm, H, cfg):
     mem_used, mem_total = sm.mem
     mem_pct = 100 * mem_used / max(1, mem_total)
     n = min(8, H - 19)
     by_mem = cfg.get("sort") == "mem"
     ncores = getattr(sm, "ncores", 1)
-    bar_w = 20
+    bar_w = 28
 
     L = [[]] + panel_title("PROCESSES")
-    summary = f"load {sm.load[0]:.2f} \u00b7 up {fmt_up(sm.uptime)} \u00b7 {len(sm.procs)} procs"
-    L.append([seg(clip(summary, TW).center(TW), HINT)])
+    L.append(fill([seg("load ", HINT), seg(f"{sm.load[0]:.2f}", GRAY), seg("  \u00b7  ", DARK),
+                   seg("up ", HINT), seg(fmt_up(sm.uptime), GRAY), seg("  \u00b7  ", DARK),
+                   seg(f"{getattr(sm, 'nproc', len(sm.procs))}", GRAY), seg(" tasks", HINT)]))
     L.append([])
     L.append(gauge("CPU", sm.cpu / 100, f"{sm.cpu:.0f}%", width=bar_w))
-    if n >= 2 and sm.hist:
+    if n >= 2:
         hist = list(sm.hist)[-bar_w:]
-        spark = [seg("    ", DIM), seg(" " * (bar_w - len(hist)))]
+        spark = [seg("    "), seg("\u2581" * (bar_w - len(hist)), DARK)]
         spark += [seg("\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"[min(7, int(v / 12.5))], ramp(v / 100)) for v in hist]
-        L.append(spark)
+        L.append(fill(spark))
     L.append(gauge("MEM", mem_used / max(1, mem_total), f"{mem_pct:.0f}%", width=bar_w))
     if n >= 2:
-        L.append([seg(f"    {human(mem_used)} of {human(mem_total)} used", DIM)])
+        L.append(fill([seg("    "), seg(human(mem_used), GRAY), seg(" of ", HINT), seg(human(mem_total), GRAY), seg(" in use", HINT)]))
         L.append([])
-        L.append([seg("    " + pad("PROCESS", 17) + pad("CPU%", 6, ">") + " " + pad("MEM", 7, ">"), HINT)])
-        L.append([seg("\u2500" * 35, DARK)])
+        arrow = "\u25be"
+        cpu_h = "CPU" + arrow if not by_mem else "CPU"
+        mem_h = "MEM" + arrow if by_mem else "MEM"
+        L.append([seg(" " * 4 + pad("PROCESS", NAME_W), HINT),
+                  seg(pad(cpu_h, CPU_W, ">"), HINT if by_mem else BLUE, not by_mem),
+                  seg(pad(mem_h, MEM_W, ">"), BLUE if by_mem else HINT, by_mem)])
+        L.append([seg("\u2500" * TW, DARK)])
         rows = sorted(sm.procs, key=(lambda r: (r[2], r[1])) if by_mem else (lambda r: (r[1], r[2])), reverse=True)
-        for i, (name, cpu, rss, _pid) in enumerate(rows[:n], 1):
+        for i, (name, cpu, rss, count) in enumerate(rows[:n], 1):
+            tag = f" \u00d7{count}" if count > 1 else ""
+            label = clip(name, NAME_W - 1 - len(tag))
+            cpu_col = ramp(min(1.0, cpu / 50)) if cpu >= 0.05 else DIM
             L.append([
-                seg(f"{i:>2}  ", DIM),
-                seg(pad(clip(name, 17), 17), WHITE, i == 1),
-                seg(f"{cpu:5.1f}%", ramp(cpu / 100) if cpu >= 0.1 else DIM),
-                seg(" "),
-                seg(f"{human(rss):>7}", DIM),
+                seg(f"{i:>2}  ", HINT),
+                seg(label, WHITE, i == 1),
+                seg(tag, HINT),
+                seg(" " * (NAME_W - str_width(label) - len(tag))),
+                seg(f"{cpu:{CPU_W - 1}.1f}%", cpu_col if not by_mem else DIM),
+                seg(f"{human(rss):>{MEM_W}}", WHITE if by_mem else DIM),
             ])
         for _ in range(n - len(rows[:n])):
             L.append([seg(" " * TW)])
         L.append([])
-        L.append([seg(clip(f"    CPU% = share of all {ncores} cores", TW), HINT)])
-        L.append([seg(clip(f"    sorted by {'memory' if by_mem else 'cpu'} \u00b7 s to change", TW), HINT)])
+        L.append([seg(f"CPU% of all {ncores} cores \u00b7 apps grouped".center(TW), HINT)])
+        L.append([seg("s sort \u00b7 p close".center(TW), HINT)])
     L.append([])
     return L
 
@@ -1853,7 +2100,7 @@ def lyric_lines(lm, p, pos, t, n):
 def build_media_lines(mm, H, t, lm=None):
     L = [[]] + panel_title("NOW PLAYING") + [[]]
     p, others = mm.current() if mm.ready and not mm.missing else (None, 0)
-    if mm.missing:
+    if mm.missing and not IS_MAC:
         L += [[seg("playerctl isn't installed", WHITE, True)], [],
               [seg("Install it to see what's playing:", DIM)], [],
               [seg("pacman -S playerctl", WHITE)], [seg("dnf install playerctl", WHITE)]]
@@ -1861,6 +2108,7 @@ def build_media_lines(mm, H, t, lm=None):
         L += [[seg("Looking for a player\u2026", DIM)]]
     elif p is None:
         L += [[seg("Nothing is playing", WHITE, True)], [],
+              [seg("Start music in Spotify or Apple Music.", DIM)]] if IS_MAC else [[seg("Nothing is playing", WHITE, True)], [],
               [seg("Start music in Spotify, a browser,", DIM)],
               [seg("VLC, mpv or any media player.", DIM)]]
     else:
@@ -2238,6 +2486,14 @@ def main(argv=None):
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("dawn needs to run in a terminal window.", file=sys.stderr)
         return 1
+    if IS_MAC and os.environ.get("TERM_PROGRAM") == "Apple_Terminal":
+        print("Heads up: macOS Terminal.app only has 256 colours, so dawn's sky will look blocky and off.\n"
+              "For the real thing use iTerm2, Ghostty, kitty, WezTerm or Alacritty.\n"
+              "Starting in 4 seconds (Ctrl+C to cancel)...", file=sys.stderr)
+        try:
+            time.sleep(4)
+        except KeyboardInterrupt:
+            return 0
     run(cfg, a.santa_now)
     return 0
 

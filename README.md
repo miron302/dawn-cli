@@ -14,9 +14,10 @@ Open a terminal, type `dawn`, and get a living sky behind a big clock, today's d
 - **Audio visualiser** (like cava): glowing bars rise out of the scene and dance to whatever you're playing
 - **Two optional side panels**, which you can open at the same time as the clock:
   - **Now Playing** (on the left): the song, artist and progress of whatever is playing, which app it's playing from, and **synced lyrics** that follow along line by line
-  - **Processes** (on the right, like a mini htop): CPU and memory gauges, a CPU history graph and the busiest programs
+  - **Processes** (on the right, like a mini htop): CPU and memory bars, a CPU history graph and the busiest programs, grouped by app
 - **Halloween mode** (start it with `dawn --halloween`): the clock turns into a glowing orange "BOO?", pumpkins light up along the bottom, and the visualiser goes black and orange
 - **Christmas mode** (press `c`, or start it with `dawn --christmas`): falling snow, a garland with holly and twinkling lights, a rare visit from Santa's sleigh, presents in the snow, and a red and green visualiser
+- Runs on **Arch-based Linux, Fedora-based Linux and macOS**
 - Finds your location automatically, or pick any city
 - Celsius or Fahrenheit, 12-hour or 24-hour clock
 - No account and no API key
@@ -29,12 +30,13 @@ Open a terminal, type `dawn`, and get a living sky behind a big clock, today's d
 | --- | --- |
 | **Arch-based distros** (Arch Linux, EndeavourOS, Manjaro, CachyOS and others) | Yes |
 | **Fedora-based distros** (Fedora, Nobara and others) | Yes |
+| **macOS**: Apple Silicon (arm64) with [Homebrew](https://brew.sh), Intel (x86_64) with [MacPorts](https://www.macports.org) | Yes |
 | Other Linux distros | May work if you install Python 3.9+, `pipx` and `git` yourself. Not officially supported. |
-| macOS, Windows | No |
+| Windows | No |
 
-The installer handles Arch-based systems (`pacman`) and Fedora-based systems (`dnf`). It asks for admin rights using whichever of `sudo`, `doas`, `run0`, `pkexec` or `su` you have. On immutable Fedora variants (Silverblue, Kinoite, Bazzite) it can't add system packages, so install `git` and `pipx` your usual way and then run the `pipx install` command below.
+The installer handles Arch-based systems (`pacman`), Fedora-based systems (`dnf`) and macOS (Homebrew on Apple Silicon, MacPorts on Intel). On Linux it asks for admin rights using whichever of `sudo`, `doas`, `run0`, `pkexec` or `su` you have. On immutable Fedora variants (Silverblue, Kinoite, Bazzite) it can't add system packages, so install `git` and `pipx` your usual way and then run the `pipx install` command below.
 
-dawn needs a terminal with "true colour" support. Most modern ones have it: Alacritty, kitty, foot, WezTerm, GNOME Terminal, Konsole, Ghostty and others.
+dawn needs a terminal with "true colour" support. Most modern ones have it: Alacritty, kitty, foot, WezTerm, GNOME Terminal, Konsole, Ghostty, iTerm2 and others. **The built-in macOS Terminal.app is the exception** (it only has 256 colours), so on a Mac use iTerm2, Ghostty, kitty, WezTerm or Alacritty.
 
 ---
 
@@ -48,7 +50,13 @@ Copy and paste this into a terminal:
 curl -fsSL https://raw.githubusercontent.com/miron302/dawn-cli/main/install.sh | bash
 ```
 
-It installs what's missing (it will ask for your password), then installs dawn. Want only dawn, without the audio visualiser and Now Playing helpers? Add `-s -- --minimal` after `bash`.
+It installs what's missing (on Linux it will ask for your password), then installs dawn. On a Mac it picks the package manager by itself: **Homebrew on Apple Silicon (arm64)** and **MacPorts on Intel (x86_64)**. If the one it needs isn't installed it tells you where to get it ([brew.sh](https://brew.sh) or [macports.org](https://www.macports.org/install.php)), and you run the same command again. MacPorts asks for your password, Homebrew must be run without `sudo`.
+
+Want the other one? Add `-s -- --macports` or `-s -- --brew` after `bash`, for example:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/miron302/dawn-cli/main/install.sh | bash -s -- --macports
+``` Want only dawn, without the audio visualiser and Now Playing helpers? Add `-s -- --minimal` after `bash`.
 
 Using `doas` or something else instead of `sudo`? It works out which one you have. To choose yourself, put `PRIV_CMD=doas` at the start of the line (`curl ... | PRIV_CMD=doas bash`).
 
@@ -78,7 +86,23 @@ pipx install git+https://github.com/miron302/dawn-cli.git
 pipx ensurepath
 ```
 
-Use `doas` (or your tool of choice) in place of `sudo` if you prefer.
+**macOS, Apple Silicon** (needs [Homebrew](https://brew.sh))
+
+```bash
+brew install pipx git
+pipx install git+https://github.com/miron302/dawn-cli.git
+pipx ensurepath
+```
+
+**macOS, Intel** (needs [MacPorts](https://www.macports.org/install.php))
+
+```bash
+sudo port install pipx git
+pipx install git+https://github.com/miron302/dawn-cli.git
+pipx ensurepath
+```
+
+Use `doas` (or your tool of choice) in place of `sudo` on Linux if you prefer.
 
 Then open a new terminal and type `dawn`.
 
@@ -86,10 +110,10 @@ Then open a new terminal and type `dawn`.
 
 These make the two music features work. Everything else works without them.
 
-| Feature | Arch-based | Fedora-based |
-| --- | --- | --- |
-| Audio visualiser | `sudo pacman -S libpulse` | `sudo dnf install pulseaudio-utils` |
-| Now Playing panel | `sudo pacman -S playerctl` | `sudo dnf install playerctl` |
+| Feature | Arch-based | Fedora-based | macOS |
+| --- | --- | --- | --- |
+| Audio visualiser | `sudo pacman -S libpulse` | `sudo dnf install pulseaudio-utils` | Optional: `brew install ffmpeg` (or `sudo port install ffmpeg`) plus a virtual audio device (see below) |
+| Now Playing panel | `sudo pacman -S playerctl` | `sudo dnf install playerctl` | Nothing for Spotify and Apple Music. `brew install nowplaying-cli` for other apps (Homebrew only). |
 
 ---
 
@@ -135,9 +159,47 @@ Play some music (Spotify, YouTube, mpv, anything) and bars rise from the bottom 
 
 If the bars stay flat while music is playing, make sure the helper from "Optional extras" is installed (`parec --version` should print something) and that PipeWire or PulseAudio is running.
 
+### Visualiser on macOS (optional)
+
+macOS doesn't let apps listen to the sound it is playing, so on a Mac the visualiser needs a **virtual audio device** to read from. **It's optional**: the clock, weather, processes, Now Playing and all the modes work without it. If you don't want it, run `dawn --no-viz --save` and the "visualiser needs..." note at the bottom goes away.
+
+dawn looks for these devices by itself, in this order of preference for most people:
+
+| Device | Cost | Notes |
+| --- | --- | --- |
+| [BlackHole](https://github.com/ExistentialAudio/BlackHole) (2ch) | Open source (GPL-3). The project's own website has asked some people to pay or sponsor before it hands out the installer, so if that happens to you, use one of the two ways below instead. | The one dawn is tested against |
+| [Loopback](https://rogueamoeba.com/loopback/) | **Paid** (Rogue Amoeba) | Works if you already own it |
+| Soundflower | Free, but unmaintained | Often doesn't work on recent macOS |
+
+Ways to get BlackHole without going through the website's download page:
+
+- **Homebrew:** `brew install --cask blackhole-2ch` (it downloads the installer straight from the project, then reboot).
+- **Build it yourself, which is always free under its open-source licence.** Clone the [BlackHole repository](https://github.com/ExistentialAudio/BlackHole) and follow its build instructions. You need Xcode.
+
+Then set it up once:
+
+1. Install ffmpeg (`brew install ffmpeg` or `sudo port install ffmpeg`, the installer script already does this).
+2. Open **Audio MIDI Setup**, click **+** at the bottom left and choose **Create Multi-Output Device**. Tick your speakers or headphones **and** BlackHole 2ch.
+3. In **System Settings → Sound**, pick that Multi-Output Device as the output.
+4. Run `dawn`. It finds BlackHole by itself.
+
+Good to know:
+
+- macOS will ask whether your terminal may use the microphone. That's because virtual devices like BlackHole show up as an input device. dawn only reads the virtual device (what your Mac is playing), never your real microphone.
+- While a Multi-Output Device is selected, the keyboard volume keys don't work. Set the volume in the app you're playing from, or switch the output back when you're done.
+- To use a different device, set `DAWN_AUDIO_DEVICE` to part of its name or its number, for example `DAWN_AUDIO_DEVICE="My Device" dawn`.
+
 ## The process viewer
 
-Press `p` to open a frosted-glass panel on the right of the clock. It shows CPU and memory use, a short CPU history graph, load and uptime, and the busiest programs with their CPU and memory use. Every CPU percentage is a share of the whole machine: the process list and the big CPU gauge above it use the same scale, so the busiest programs add up to roughly the total shown there. That makes a busy program easy to compare with overall CPU use. It's a quick glance, not a replacement for htop (you can't kill processes from here).
+Press `p` to open a frosted-glass panel on the right of the clock. From top to bottom it shows:
+
+- **A summary line** with the load average, how long the machine has been up and how many tasks are running
+- **CPU and memory bars** that shift from green to yellow to red as they fill, with the percentage on the right. A short graph of recent CPU use sits under the CPU bar, and "used of total" sits under the memory bar
+- **The busiest programs**, one row each, with their CPU and memory use. The column you're sorting by is highlighted in the header, and `s` switches between CPU and memory
+
+Programs that run as many processes (a browser and all its helpers, for example) are **grouped into one row**, marked with `×` and the number of processes, so one busy app doesn't take up the whole list. Their memory is added up. On Linux, kernel threads are left out, since they aren't programs you can do anything about.
+
+Every CPU percentage is a share of the whole machine: the process list and the big CPU bar use the same scale, so the busiest programs add up to roughly the total shown there. It's a quick glance, not a replacement for htop (you can't kill processes from here). It works the same way on Linux and macOS.
 
 ## Now Playing
 
@@ -153,6 +215,8 @@ When a song has synced lyrics, they show under the progress bar, with the line b
 - Lyrics you've seen are remembered in `~/.cache/dawn/lyrics.json` (the last 300 songs), so a song is only looked up once. You can delete that file at any time.
 
 It works with any player that reports what it's playing to your desktop. That includes Spotify, Firefox, Chromium-based browsers (Chrome, Brave and others), VLC, Rhythmbox and many more. mpv needs the `mpv-mpris` add-on to report anything. It needs the `playerctl` helper from "Optional extras".
+
+**On macOS** it works with **Spotify** and **Apple Music** out of the box (dawn only asks an app what it's playing if that app is already open, so it never launches one). Other apps, such as browsers, are picked up through `nowplaying-cli` if you installed it. Apple restricted that kind of access in macOS 15.4, so on newer versions it may only see some apps.
 
 ## Halloween mode
 
@@ -209,7 +273,7 @@ That's a missing piece in `pipx` itself, not dawn. Install it and try again: `su
 Run `pipx ensurepath`, then close and reopen your terminal.
 
 **The colours look flat or strange**
-dawn needs a terminal with "true colour" support (see "Supported systems"). It will not look right on the plain Linux text console (the one you get with Ctrl+Alt+F3).
+dawn needs a terminal with "true colour" support (see "Supported systems"). It will not look right on the plain Linux text console (the one you get with Ctrl+Alt+F3), or in macOS Terminal.app. On a Mac, switch to iTerm2, Ghostty, kitty, WezTerm or Alacritty.
 
 **It says "Weather unavailable"**
 Check your internet connection. dawn keeps retrying every 20 seconds on its own.
@@ -219,6 +283,9 @@ Automatic location is based on your internet connection and can be off by a city
 
 **The visualiser says "install libpulse"**
 Install the audio helper from "Optional extras", then restart dawn.
+
+**On a Mac the visualiser says it needs ffmpeg or an audio loopback device**
+The visualiser is optional on macOS. Either do the setup in "Visualiser on macOS" and restart dawn, or turn it off with `dawn --no-viz --save`. If it says audio capture stopped, check **System Settings → Privacy & Security → Microphone** and allow your terminal.
 
 **Now Playing says "playerctl isn't installed"**
 Install it from "Optional extras", then restart dawn.
@@ -230,7 +297,7 @@ LRCLIB doesn't have time-stamped lyrics for that song, or the title in your play
 Check your internet connection. dawn tries again by itself after half a minute.
 
 **Now Playing says "Nothing is playing" but music is on**
-The app has to report what it's playing. Most do. If yours doesn't, `playerctl -l` lists the players dawn can see, and an empty list means your app isn't reporting. A player that has nothing loaded is skipped.
+On a Mac, only Spotify and Apple Music are supported out of the box (see "Now Playing"). On Linux, the app has to report what it's playing. Most do. If yours doesn't, `playerctl -l` lists the players dawn can see, and an empty list means your app isn't reporting. A player that has nothing loaded is skipped.
 
 **Some symbols look like empty boxes**
 (This includes the snowflakes `❄` and `❅` in Christmas mode.) Install a font with good symbol coverage (for example DejaVu: `ttf-dejavu` on Arch, `dejavu-sans-fonts` on Fedora) and make sure your terminal uses it.
@@ -251,7 +318,7 @@ dawn does not collect anything and has no tracking. To work, it talks to these f
 - [ipwho.is](https://ipwho.is/) to guess your city from your IP address (skipped when you use `--city`)
 - [LRCLIB](https://lrclib.net) for lyrics, **only while the Now Playing panel is open and lyrics are on**. To find lyrics it sends the current song's title, artist, album and length (plus the usual details any web request carries, like your IP address). Press `l` or use `--no-lyrics` and it sends nothing.
 
-The audio visualiser and process viewer run entirely on your computer and send nothing anywhere. The Now Playing panel itself does too, apart from the lyrics lookups above.
+The audio visualiser and process viewer run entirely on your computer and send nothing anywhere. (On macOS the visualiser listens to a virtual audio device such as BlackHole, see above, and never to your microphone.) The Now Playing panel itself does too, apart from the lyrics lookups above.
 
 ---
 
