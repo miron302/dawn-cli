@@ -1,6 +1,6 @@
 # Maintainer: miron302
 pkgname=dawn-cli
-pkgver=1.8.0
+pkgver=1.8.1
 pkgrel=1
 pkgdesc="Terminal dashboard with weather, clock, audio visualiser, processes and now playing"
 arch=('any')
@@ -12,7 +12,7 @@ optdepends=('libpulse: audio visualiser (provides parec)'
             'playerctl: Now Playing panel'
             'python-numpy: lighter CPU use for the audio visualiser')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# The checksum below belongs to v1.7.0. After you push the v1.8.0 tag, run `updpkgsums` in this folder.
+# The checksum below belongs to v1.7.0. After you push the v1.8.1 tag, run `updpkgsums` in this folder.
 sha256sums=('71e7de95eba00060471ce4b1c2183adbc8ca6561aa2c64ebab208b88872ae1b5')
 
 build() {

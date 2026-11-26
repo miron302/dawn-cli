@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "dawn-cli"
-version = "1.8.0"
+version = "1.8.1"
 description = "A beautiful weather, time and date dashboard for your terminal"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
 keywords = ["terminal", "weather", "clock", "cli", "tui", "arch-linux", "macos"]
 dependencies = []
 
@@ -20,3 +20,6 @@ dawn = "dawn.app:main"
 
 [tool.setuptools]
 packages = ["dawn"]
+
+[tool.setuptools.package-data]
+dawn = ["helper/*"]

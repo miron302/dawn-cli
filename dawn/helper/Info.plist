@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>io.github.miron302.dawn-audiotap</string>
+  <key>CFBundleName</key><string>dawn-audiotap</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>dawn's audio visualiser listens to the sound your Mac is playing so the bars can move to it. Nothing is recorded or sent anywhere.</string>
+</dict>
+</plist>

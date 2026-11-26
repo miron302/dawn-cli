@@ -30,9 +30,11 @@ Open a terminal, type `dawn`, and get a living sky behind a big clock, today's d
 | --- | --- |
 | **Arch-based distros** (Arch Linux, EndeavourOS, Manjaro, CachyOS and others) | Yes |
 | **Fedora-based distros** (Fedora, Nobara and others) | Yes |
-| **macOS**: Apple Silicon (arm64) with [Homebrew](https://brew.sh), Intel (x86_64) with [MacPorts](https://www.macports.org) | Yes |
+| **macOS** (Apple Silicon and Intel) | Yes. Needs Python 3.9+, which Apple's Command Line Tools include, so no package manager is needed. Without it, Apple Silicon uses [Homebrew](https://brew.sh) and Intel uses [MacPorts](https://www.macports.org) |
 | Other Linux distros | May work if you install Python 3.9+, `pipx` and `git` yourself. Not officially supported. |
 | Windows | No |
+
+The macOS visualiser needs macOS 14.2 or newer. Everything else in dawn works on older versions too.
 
 The installer handles Arch-based systems (`pacman`), Fedora-based systems (`dnf`) and macOS (Homebrew on Apple Silicon, MacPorts on Intel). On Linux it asks for admin rights using whichever of `sudo`, `doas`, `run0`, `pkexec` or `su` you have. On immutable Fedora variants (Silverblue, Kinoite, Bazzite) it can't add system packages, so install `git` and `pipx` your usual way and then run the `pipx install` command below.
 
@@ -50,13 +52,19 @@ Copy and paste this into a terminal:
 curl -fsSL https://raw.githubusercontent.com/miron302/dawn-cli/main/install.sh | bash
 ```
 
-It installs what's missing (on Linux it will ask for your password), then installs dawn. On a Mac it picks the package manager by itself: **Homebrew on Apple Silicon (arm64)** and **MacPorts on Intel (x86_64)**. If the one it needs isn't installed it tells you where to get it ([brew.sh](https://brew.sh) or [macports.org](https://www.macports.org/install.php)), and you run the same command again. MacPorts asks for your password, Homebrew must be run without `sudo`.
+It installs what's missing (on Linux it will ask for your password), then installs dawn. On a Mac it first looks for a Python 3.9+ that is already there (Apple's Command Line Tools include one). If it finds one, it needs **no package manager at all**: it puts dawn in a private environment in `~/.local/share/dawn/venv` and adds the `dawn` command to `~/.local/bin`. Otherwise it picks the package manager by itself: **Homebrew on Apple Silicon (arm64)** and **MacPorts on Intel (x86_64)**. If the one it needs isn't installed it tells you where to get it ([brew.sh](https://brew.sh) or [macports.org](https://www.macports.org/install.php)), and you run the same command again. MacPorts asks for your password, Homebrew must be run without `sudo`.
+
+You can choose on a Mac by adding `-s -- --light` (use the Mac's own Python, no package manager), `-s -- --macports` or `-s -- --brew` after `bash`. The light route doesn't even need `git`.
 
 Want the other one? Add `-s -- --macports` or `-s -- --brew` after `bash`, for example:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/miron302/dawn-cli/main/install.sh | bash -s -- --macports
-``` Want only dawn, without the audio visualiser and Now Playing helpers? Add `-s -- --minimal` after `bash`.
+```
+
+On a Mac with macOS 14.2 or newer the installer also downloads dawn's small built-in audio helper for the visualiser (see [Visualiser on macOS](#visualiser-on-macos-the-built-in-helper)). Nothing gets compiled and no extra tools are needed.
+
+Want only dawn, without the audio visualiser and Now Playing helpers? Add `-s -- --minimal` after `bash`.
 
 Using `doas` or something else instead of `sudo`? It works out which one you have. To choose yourself, put `PRIV_CMD=doas` at the start of the line (`curl ... | PRIV_CMD=doas bash`).
 
@@ -86,12 +94,23 @@ pipx install git+https://github.com/miron302/dawn-cli.git
 pipx ensurepath
 ```
 
+**macOS, no package manager** (needs Python 3.9+; Apple's Command Line Tools include it, install them with `xcode-select --install`)
+
+```bash
+python3 -m venv ~/.local/share/dawn/venv
+~/.local/share/dawn/venv/bin/pip install git+https://github.com/miron302/dawn-cli.git
+mkdir -p ~/.local/bin && ln -sf ~/.local/share/dawn/venv/bin/dawn ~/.local/bin/dawn
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile   # then open a new terminal
+dawn --setup-helper   # optional: downloads the audio helper for the visualiser (macOS 14.2+)
+```
+
 **macOS, Apple Silicon** (needs [Homebrew](https://brew.sh))
 
 ```bash
 brew install pipx git
 pipx install git+https://github.com/miron302/dawn-cli.git
 pipx ensurepath
+dawn --setup-helper   # optional: downloads the audio helper for the visualiser (macOS 14.2+)
 ```
 
 **macOS, Intel** (needs [MacPorts](https://www.macports.org/install.php))
@@ -100,6 +119,7 @@ pipx ensurepath
 sudo port install pipx git
 pipx install git+https://github.com/miron302/dawn-cli.git
 pipx ensurepath
+dawn --setup-helper   # optional: downloads the audio helper for the visualiser (macOS 14.2+)
 ```
 
 Use `doas` (or your tool of choice) in place of `sudo` on Linux if you prefer.
@@ -112,8 +132,8 @@ These make the two music features work. Everything else works without them.
 
 | Feature | Arch-based | Fedora-based | macOS |
 | --- | --- | --- | --- |
-| Audio visualiser | `sudo pacman -S libpulse` | `sudo dnf install pulseaudio-utils` | Optional: `brew install ffmpeg` (or `sudo port install ffmpeg`) plus a virtual audio device (see below) |
-| Now Playing panel | `sudo pacman -S playerctl` | `sudo dnf install playerctl` | Nothing for Spotify and Apple Music. `brew install nowplaying-cli` for other apps (Homebrew only). |
+| Audio visualiser | `sudo pacman -S libpulse` | `sudo dnf install pulseaudio-utils` | Built in (macOS 14.2+): the installer downloads it, or run `dawn --setup-helper`. Nothing to compile. See [below](#visualiser-on-macos-the-built-in-helper). |
+| Now Playing panel | `sudo pacman -S playerctl` | `sudo dnf install playerctl` | Nothing for Spotify and Apple Music. For other apps you can add `nowplaying-cli` yourself (`brew install nowplaying-cli`); the installer doesn't. |
 
 ---
 
@@ -159,35 +179,69 @@ Play some music (Spotify, YouTube, mpv, anything) and bars rise from the bottom 
 
 If the bars stay flat while music is playing, make sure the helper from "Optional extras" is installed (`parec --version` should print something) and that PipeWire or PulseAudio is running.
 
-### Visualiser on macOS (optional)
+### Visualiser on macOS: the built-in helper
 
-macOS doesn't let apps listen to the sound it is playing, so on a Mac the visualiser needs a **virtual audio device** to read from. **It's optional**: the clock, weather, processes, Now Playing and all the modes work without it. If you don't want it, run `dawn --no-viz --save` and the "visualiser needs..." note at the bottom goes away.
+macOS doesn't let ordinary programs listen to the sound it is playing, so a Python program like dawn can't do it by itself. On a Mac the visualiser therefore **needs dawn's built-in helper**, a tiny program called `dawn-audiotap` that ships inside dawn. You don't have to install anything else: no virtual audio device, no paid software, no changing your sound output.
 
-dawn looks for these devices by itself, in this order of preference for most people:
+**What the helper does**
 
-| Device | Cost | Notes |
-| --- | --- | --- |
-| [BlackHole](https://github.com/ExistentialAudio/BlackHole) (2ch) | Open source (GPL-3). The project's own website has asked some people to pay or sponsor before it hands out the installer, so if that happens to you, use one of the two ways below instead. | The one dawn is tested against |
-| [Loopback](https://rogueamoeba.com/loopback/) | **Paid** (Rogue Amoeba) | Works if you already own it |
-| Soundflower | Free, but unmaintained | Often doesn't work on recent macOS |
+1. When the visualiser is on, dawn starts the helper in the background.
+2. The helper asks macOS for a copy of the sound going to your speakers or headphones. It uses a feature Apple added in macOS 14.2 called a Core Audio *process tap*, which is exactly meant for this.
+3. It turns that sound into a plain stream of numbers (one channel, 22,050 samples a second) and passes them to dawn through a pipe.
+4. dawn turns the numbers into the bars you see. When you quit dawn or turn the visualiser off, the helper stops and cleans up after itself.
 
-Ways to get BlackHole without going through the website's download page:
+**What it does not do:** it doesn't record anything to disk, doesn't send anything over the network, never touches your microphone, doesn't mute or change your sound, and doesn't affect other apps. Your volume keys and output device keep working normally.
 
-- **Homebrew:** `brew install --cask blackhole-2ch` (it downloads the installer straight from the project, then reboot).
-- **Build it yourself, which is always free under its open-source licence.** Clone the [BlackHole repository](https://github.com/ExistentialAudio/BlackHole) and follow its build instructions. You need Xcode.
+**What you need**
 
-Then set it up once:
+- **macOS 14.2 or newer.** (On older versions see "Older macOS" below.)
+- **A one-time download** of the helper, which is a small ready-made file. You do **not** need Xcode, the Command Line Tools or any other developer software for this.
+- **One permission** (below).
 
-1. Install ffmpeg (`brew install ffmpeg` or `sudo port install ffmpeg`, the installer script already does this).
-2. Open **Audio MIDI Setup**, click **+** at the bottom left and choose **Create Multi-Output Device**. Tick your speakers or headphones **and** BlackHole 2ch.
-3. In **System Settings → Sound**, pick that Multi-Output Device as the output.
-4. Run `dawn`. It finds BlackHole by itself.
+**Setting it up**
 
-Good to know:
+The installer script does this for you on macOS 14.2+. To do it yourself, or to redo it:
 
-- macOS will ask whether your terminal may use the microphone. That's because virtual devices like BlackHole show up as an input device. dawn only reads the virtual device (what your Mac is playing), never your real microphone.
-- While a Multi-Output Device is selected, the keyboard volume keys don't work. Set the volume in the app you're playing from, or switch the output back when you're done.
-- To use a different device, set `DAWN_AUDIO_DEVICE` to part of its name or its number, for example `DAWN_AUDIO_DEVICE="My Device" dawn`.
+```bash
+dawn --setup-helper
+```
+
+That downloads the ready-made helper for your version of dawn from dawn's [GitHub releases](https://github.com/miron302/dawn-cli/releases), checks its SHA-256 checksum, makes sure it runs on your Mac, and installs it as `~/.local/share/dawn/dawn-audiotap` (no `sudo` needed). Then it runs a quick test. The test is what makes macOS ask for permission, so keep an eye out for the pop-up and choose **Allow**.
+
+If the download isn't possible (you're offline, or that version's helper hasn't been published yet), dawn falls back to **building the helper from its source** on your Mac. That route needs Apple's Command Line Tools (`xcode-select --install`). You can also choose it on purpose, for example if you'd rather not run a downloaded file and want to read the code first (it's one file, `dawn/helper/dawn-audiotap.swift`):
+
+```bash
+dawn --setup-helper --from-source
+```
+
+**The permission**
+
+macOS wants you to approve any app that records system audio. Because dawn runs inside your terminal, the permission is given to your **terminal app** (Terminal, iTerm2, Ghostty, kitty and so on), once:
+
+1. Open **System Settings → Privacy & Security → Screen & System Audio Recording**.
+2. Find the **System Audio Recording Only** section (the wording differs a little between macOS versions) and switch your terminal app on. If it isn't in the list, click **+** and add it from your Applications folder.
+3. Quit your terminal completely and open it again, then start `dawn`.
+
+Some terminals, iTerm2 in particular, don't always show the pop-up, so you may have to add them by hand like this. If the permission is missing, macOS doesn't give an error: it simply hands over silence, so the bars stay flat while music plays.
+
+**Turning it off or removing it**
+
+- Don't want the visualiser? `dawn --no-viz --save` turns it off for good and the note at the bottom goes away.
+- To remove the helper, delete the file: `rm ~/.local/share/dawn/dawn-audiotap`. (`pipx uninstall dawn-cli` removes dawn itself but leaves this file.)
+- To keep it somewhere else, set `DAWN_HELPER_DIR` to another folder when you run `dawn --setup-helper` and when you run `dawn`.
+
+**Older macOS (13 and earlier)**
+
+The helper can't work there, so the visualiser can only run if you route your sound through a virtual audio device such as [BlackHole](https://github.com/ExistentialAudio/BlackHole), which dawn will find by itself. You also need `ffmpeg` (`brew install ffmpeg` or `sudo port install ffmpeg`). Set it up like this:
+
+1. Install BlackHole 2ch. It's open source (GPL-3), but its website has asked some people to pay before handing out the installer. If that happens to you, run `brew install --cask blackhole-2ch`, or build it yourself from its [GitHub repository](https://github.com/ExistentialAudio/BlackHole) (you need Xcode).
+2. Open **Audio MIDI Setup**, click **+** and choose **Create Multi-Output Device**. Tick your speakers or headphones **and** BlackHole 2ch.
+3. In **System Settings → Sound**, choose that Multi-Output Device as the output. (While it's selected the keyboard volume keys don't work.)
+4. Run `dawn`.
+
+To use a different device, set `DAWN_AUDIO_DEVICE` to part of its name or its number, for example `DAWN_AUDIO_DEVICE="My Device" dawn`. dawn also finds Loopback (paid, from Rogue Amoeba) and Soundflower (free, unmaintained, often broken on recent macOS) by name.
+
+**Credits:** the helper follows the way [AudioTee](https://github.com/makeusabrew/audiotee) (MIT licence, by Nick Payne) sets up the audio tap. The licence text is in the helper's source file.
 
 ## The process viewer
 
@@ -262,6 +316,10 @@ pipx upgrade dawn-cli      # update to the latest version
 pipx uninstall dawn-cli    # remove it
 ```
 
+If you installed on macOS without a package manager (the light install), run the installer again to update, and remove dawn with `rm -r ~/.local/share/dawn ~/.local/bin/dawn`. That also deletes the audio helper.
+
+On macOS, updating dawn doesn't rebuild the audio helper. If a release's notes say the helper changed, run `dawn --setup-helper` again. Uninstalling dawn leaves the helper behind; delete it with `rm -r ~/.local/share/dawn`.
+
 ---
 
 ## Troubleshooting
@@ -270,7 +328,7 @@ pipx uninstall dawn-cli    # remove it
 That's a missing piece in `pipx` itself, not dawn. Install it and try again: `sudo pacman -S python-filelock` (Arch-based) or `sudo dnf install python3-filelock` (Fedora-based). The installer script does this for you on Arch-based systems.
 
 **`dawn: command not found`**
-Run `pipx ensurepath`, then close and reopen your terminal.
+Run `pipx ensurepath`, then close and reopen your terminal. If you installed on macOS without a package manager, `~/.local/bin` has to be on your PATH: the installer adds it to `~/.zprofile` (or `~/.bash_profile`), so open a new terminal window, or add it yourself with `export PATH="$HOME/.local/bin:$PATH"`.
 
 **The colours look flat or strange**
 dawn needs a terminal with "true colour" support (see "Supported systems"). It will not look right on the plain Linux text console (the one you get with Ctrl+Alt+F3), or in macOS Terminal.app. On a Mac, switch to iTerm2, Ghostty, kitty, WezTerm or Alacritty.
@@ -284,8 +342,24 @@ Automatic location is based on your internet connection and can be off by a city
 **The visualiser says "install libpulse"**
 Install the audio helper from "Optional extras", then restart dawn.
 
-**On a Mac the visualiser says it needs ffmpeg or an audio loopback device**
-The visualiser is optional on macOS. Either do the setup in "Visualiser on macOS" and restart dawn, or turn it off with `dawn --no-viz --save`. If it says audio capture stopped, check **System Settings → Privacy & Security → Microphone** and allow your terminal.
+**On a Mac the visualiser says "run: dawn --setup-helper"**
+The built-in audio helper hasn't been set up yet. Run `dawn --setup-helper`; it only needs an internet connection. If it says it couldn't download the helper and needs the Command Line Tools, either try again when you're online or run `xcode-select --install`, wait for it to finish, then run `dawn --setup-helper` again. On macOS older than 14.2 the helper can't be used: see "Older macOS" in the visualiser section.
+
+**On a Mac the bars stay flat while music plays**
+Almost always the permission: add your terminal app under **System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only**, then quit and reopen the terminal. You can test the helper on its own with `~/.local/share/dawn/dawn-audiotap --check`, which prints `ok` when it works. Also make sure the sound really is playing on this Mac's speakers or headphones, because that is what the helper listens to.
+
+**On a Mac the visualiser says "audio capture stopped"**
+The helper quit on its own. Run `dawn --setup-helper` to set it up again and test it, which also shows any error message. If you just updated macOS, running it again often fixes it.
+
+**`dawn --setup-helper` says the helper didn't build, with "unable to load standard library"**
+This only happens when the helper is built from source (because it couldn't be downloaded, or you used `--from-source`). It means the Swift compiler can't use your macOS SDK. It almost always means Apple's Command Line Tools are damaged or older than your macOS (it often happens right after a macOS update). The script prints some details about your setup and the steps below:
+
+1. Open **System Settings → General → Software Update** and install any "Command Line Tools for Xcode" update that is offered.
+2. If there isn't one, reinstall them: `sudo rm -rf /Library/Developer/CommandLineTools`, then `xcode-select --install` and wait for it to finish.
+3. If you use the full Xcode app, make it the active one: `sudo xcode-select -s /Applications/Xcode.app`.
+4. Run `dawn --setup-helper` again. (Once you're online and that version's helper is published, a plain `dawn --setup-helper` downloads it and skips the compiler completely.)
+
+If it still fails, open an issue and paste everything the script printed. For any other build error, the same applies: the message comes from the Swift compiler, not from dawn. To use a different Swift compiler, run `SWIFTC=/path/to/swiftc dawn --setup-helper`.
 
 **Now Playing says "playerctl isn't installed"**
 Install it from "Optional extras", then restart dawn.
@@ -318,7 +392,7 @@ dawn does not collect anything and has no tracking. To work, it talks to these f
 - [ipwho.is](https://ipwho.is/) to guess your city from your IP address (skipped when you use `--city`)
 - [LRCLIB](https://lrclib.net) for lyrics, **only while the Now Playing panel is open and lyrics are on**. To find lyrics it sends the current song's title, artist, album and length (plus the usual details any web request carries, like your IP address). Press `l` or use `--no-lyrics` and it sends nothing.
 
-The audio visualiser and process viewer run entirely on your computer and send nothing anywhere. (On macOS the visualiser listens to a virtual audio device such as BlackHole, see above, and never to your microphone.) The Now Playing panel itself does too, apart from the lyrics lookups above.
+The audio visualiser and process viewer run entirely on your computer and send nothing anywhere. (On macOS the built-in helper only takes a copy of the sound your Mac is playing, never your microphone, and keeps it in memory just long enough to draw the bars.) The Now Playing panel itself does too, apart from the lyrics lookups above.
 
 ---
 
@@ -333,7 +407,18 @@ dawn --once --media       # same, with a sample track if nothing is playing
 dawn --once --christmas --santa-now   # one frame of Christmas mode with Santa on screen
 ```
 
-Pure Python 3.9+, standard library only. If `numpy` is installed, the visualiser uses it automatically to use a bit less CPU. Without it, a small built-in FFT does the job.
+The macOS audio helper is a single Swift file, `dawn/helper/dawn-audiotap.swift`. `dawn/helper/install-helper.sh` (run it with `dawn --setup-helper`) downloads the prebuilt helper from the GitHub release, or builds the Swift file when that isn't possible. `dawn-audiotap --check` starts the audio tap for a moment and prints `ok`; with no arguments it streams 16-bit mono audio to stdout, which is how dawn reads it.
+
+Pure Python 3.9+, standard library only (the macOS audio helper is the one small piece of Swift). If `numpy` is installed, the visualiser uses it automatically to use a bit less CPU. Without it, a small built-in FFT does the job.
+
+### Publishing the macOS helper with a release
+
+The prebuilt helper is one file that runs on Apple Silicon and Intel Macs. It has to be attached to **every** GitHub release, named exactly `dawn-audiotap-macos-universal`, together with `dawn-audiotap-macos-universal.sha256` (users of version 1.8.1 download it from the `v1.8.1` release).
+
+- **Automatic:** push a version tag (`git tag v1.8.1 && git push origin v1.8.1`). The GitHub Action in `.github/workflows/helper.yml` builds it on a Mac runner and attaches both files, creating the release if it doesn't exist yet. You can also start it by hand from the Actions tab.
+- **By hand:** on a Mac with the Command Line Tools run `packaging/build-helper-release.sh`, then upload the two files in `dist/` to the release (`gh release upload v1.8.1 dist/dawn-audiotap-macos-universal dist/dawn-audiotap-macos-universal.sha256`).
+
+Until a version's helper is published, `dawn --setup-helper` falls back to building from source, so nothing breaks, it just needs the Command Line Tools.
 
 ## License
 

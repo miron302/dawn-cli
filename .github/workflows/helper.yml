@@ -1,0 +1,35 @@
+# Builds dawn's macOS audio helper and attaches it to the GitHub release, so Mac users can download it
+# instead of compiling it. Runs when you push a version tag (git tag v1.8.1 && git push origin v1.8.1),
+# or by hand from the Actions tab (the build is then kept as a downloadable artifact only).
+name: Build macOS audio helper
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the universal helper
+        run: packaging/build-helper-release.sh
+
+      - name: Keep the build as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dawn-audiotap-macos-universal
+          path: dist/dawn-audiotap-macos-universal*
+
+      - name: Attach it to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/dawn-audiotap-macos-universal dist/dawn-audiotap-macos-universal.sha256 --clobber

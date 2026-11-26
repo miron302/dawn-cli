@@ -358,6 +358,22 @@ def make_fft(N):
     return fft
 
 
+HELPER = "dawn-audiotap"  # dawn's built-in macOS audio helper, built by `dawn --setup-helper`
+
+
+def helper_dir():
+    env = os.environ.get("DAWN_HELPER_DIR")
+    return Path(env) if env else Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "dawn"
+
+
+def find_helper():
+    """Path of the built-in macOS audio helper if it has been built, otherwise None."""
+    for cand in (os.environ.get("DAWN_HELPER"), str(helper_dir() / HELPER)):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return shutil.which(HELPER)
+
+
 class Audio:
     RATE, N = 22050, 1024
 
@@ -392,17 +408,21 @@ class Audio:
                 "--channels=1", "--latency-msec=20"]
 
     def _command_mac(self):
-        # macOS can't hand out the sound it is playing, so dawn reads a loopback device
-        # (BlackHole, Loopback or Soundflower) through ffmpeg. The visualiser is optional on macOS; see the README.
+        # 1. dawn's built-in helper (macOS 14.2+): taps the system audio directly, nothing else to install.
+        helper = find_helper()
+        if helper:
+            return [helper, "--sample-rate", str(self.RATE)]
+        # 2. Older macOS, or no helper built: read a virtual loopback device (BlackHole, Loopback, ...) through ffmpeg.
+        hint = "run: dawn --setup-helper to enable the visualiser (see README)"
         exe = shutil.which("ffmpeg")
         if not exe:
-            self.err = "visualiser needs ffmpeg and an audio loopback device (see README)"
+            self.err = hint
             return None
         try:
             listing = subprocess.run([exe, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
                                      capture_output=True, text=True, timeout=8, errors="replace").stderr
         except (OSError, subprocess.SubprocessError):
-            self.err = "couldn't list audio devices with ffmpeg"
+            self.err = hint
             return None
         devices, in_audio = [], False
         for line in listing.splitlines():
@@ -420,7 +440,7 @@ class Audio:
                 pick = idx
                 break
         if pick is None:
-            self.err = "visualiser needs an audio loopback device (see README)"
+            self.err = hint
             return None
         return [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "nobuffer", "-f", "avfoundation",
                 "-i", f":{pick}", "-ac", "1", "-ar", str(self.RATE), "-f", "s16le", "-"]
@@ -461,7 +481,7 @@ class Audio:
             pass
         if self.proc is proc:  # it died on its own
             self.proc = None
-            self.err = ("audio capture stopped (does your terminal have microphone access?)" if IS_MAC
+            self.err = ("audio capture stopped (see README, Troubleshooting)" if IS_MAC
                         else "audio capture stopped (is PipeWire or PulseAudio running?)")
 
     def _mags(self, data):
@@ -2460,10 +2480,22 @@ def main(argv=None):
     p.add_argument("--christmas", action=argparse.BooleanOptionalAction, help="Christmas mode: snow, lights, presents and a rare Santa flyby")
     p.add_argument("--santa-now", action="store_true", help="in Christmas mode, send Santa by a couple of seconds after starting")
     p.add_argument("--halloween", action=argparse.BooleanOptionalAction, help="start in Halloween mode (boo?)")
+    p.add_argument("--setup-helper", action="store_true",
+                   help="macOS: set up the built-in audio helper that the visualiser needs (add --from-source to build it yourself)")
+    p.add_argument("--from-source", dest="helper_args", action="append_const", const="--from-source", default=[],
+                   help=argparse.SUPPRESS)
     p.add_argument("--save", action="store_true", help="remember these options for next time")
     p.add_argument("--once", action="store_true", help="print one frame and exit (handy for screenshots)")
     p.add_argument("-v", "--version", action="version", version=f"dawn {__version__}")
     a = p.parse_args(argv)
+
+    if a.setup_helper:
+        if not IS_MAC:
+            print("The audio helper is only used on macOS. On Linux the visualiser uses parec (libpulse).", file=sys.stderr)
+            return 1
+        script = str(Path(__file__).resolve().parent / "helper" / "install-helper.sh")
+        # Extra arguments such as --from-source are passed straight on to the script.
+        return subprocess.call(["bash", script] + a.helper_args, env=dict(os.environ, DAWN_VERSION=__version__))
 
     cfg = load_config()
     for k in ("city", "units", "h12", "procs", "media", "lyrics", "viz", "halloween", "christmas"):
